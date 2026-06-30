@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAPACITY CRUNCHING</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #171717;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Press Start 2P', monospace;
+    overflow: hidden;
+  }
+  #screen {
+    position: relative;
+    display: inline-block;
+    border: 4px solid #5F6368;
+    border-radius: 8px;
+    box-shadow: 0 0 30px rgba(66,133,244,0.3), 0 0 80px rgba(66,133,244,0.1),
+                inset 0 0 60px rgba(0,0,0,0.5);
+  }
+  canvas { display: block; background: #202124; border-radius: 4px; }
+  #scanlines {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 6px);
+    pointer-events: none; border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="screen">
+  <canvas id="game" width="520" height="700"></canvas>
+  <div id="scanlines"></div>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const CW = 520, CH = 700;
+
+const COLS = 10, ROWS = 20, CELL = 28;
+const BOARD_X = 18, BOARD_Y = 74;
+const BOARD_W = COLS * CELL, BOARD_H = ROWS * CELL;
+const SIDEBAR_X = BOARD_X + BOARD_W + 20;
+
+const G = { blue:'#4285F4', red:'#EA4335', yellow:'#FBBC04', green:'#34A853',
+            bg:'#202124', surface:'#303134', text:'#E8EAED', dim:'#9AA0A6', border:'#5F6368' };
+const GCOLORS = [G.blue, G.red, G.yellow, G.green];
+
+const PIECES = [
+  { name:'VM f1-micro',  color:'#4285F4', shape:[[1,1],[1,1]],         desc:'2 vCPU / 0.6GB',  pw:3  },
+  { name:'VM n2-std-8',  color:'#34A853', shape:[[0,1,1],[1,1,0]],     desc:'8 vCPU / 32GB',   pw:5  },
+  { name:'VM m2-ultra',  color:'#EA4335', shape:[[1,1,0],[0,1,1]],     desc:'416 vCPU / 12TB', pw:6  },
+  { name:'GPU A3 Mega',  color:'#FBBC04', shape:[[1,1,1],[0,1,0]],     desc:'8x H100 / 80GB',  pw:10 },
+  { name:'TPU v5p Pod',  color:'#7BAAF7', shape:[[1,1,1,1]],           desc:'8960 chips',       pw:14 },
+  { name:'GKE Node',     color:'#1E8E3E', shape:[[1,0],[1,0],[1,1]],   desc:'e2-standard-4',    pw:7  },
+  { name:'K8s Pod',      color:'#C5221F', shape:[[0,1],[0,1],[1,1]],   desc:'Container wkld',   pw:5  },
+  { name:'Ctrl Plane',   color:'#E37400', shape:[[1,0],[1,1]],         desc:'k8s overhead!',    pw:12 },
+];
+const GARBAGE_COLOR = '#5F6368';
+const GARBAGE_ID = 9;
+
+const DATACENTERS = [
+  { name:'us-central1',     cond:'clean' },
+  { name:'us-east1',        cond:'moderate' },
+  { name:'us-east5',        cond:'terrible' },
+  { name:'europe-west1',    cond:'clean' },
+  { name:'europe-west4',    cond:'moderate' },
+  { name:'europe-north1',   cond:'clean' },
+  { name:'asia-east1',      cond:'bad' },
+  { name:'asia-northeast1', cond:'terrible' },
+  { name:'asia-south1',     cond:'bad' },
+  { name:'us-west1',        cond:'moderate' },
+  { name:'us-west4',        cond:'bad' },
+  { name:'australia-se1',   cond:'bad' },
+  { name:'southam-east1',   cond:'terrible' },
+  { name:'me-central1',     cond:'terrible' },
+  { name:'me-west1',        cond:'bad' },
+  { name:'africa-south1',   cond:'moderate' },
+];
+const DC_LABELS = { clean:'CLEAN RACKS', moderate:'LEGACY WORKLOADS', bad:'BAD BIN-PACKING', terrible:'DISASTER ZONE' };
+const DC_COLORS = { clean:G.green, moderate:G.blue, bad:G.yellow, terrible:G.red };
+const LINE_PTS = [0, 100, 300, 500, 800];
+const CLEAR_MSG = [null, ['OPTIMIZED!',G.green], ['AUTOSCALED!',G.blue],
+                   ['REGION EXPANDED!',G.yellow], ['>>> GLOBAL DEPLOY <<<',G.red]];
+const POWER_REDUCTION = [0, 15, 30, 50, 80];
+const MAX_POWER = 100;
+const REGIONS = ['us-central1','us-east1','europe-west1','asia-east1','us-west1',
+                 'europe-west4','asia-northeast1','us-east5','australia-se1','GLOBAL'];
+
+// ─── Audio ───
+let audioCtx;
+function initAudio() { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
+function beep(freq, dur, type='square', vol=0.07) {
+  if (!audioCtx) return;
+  try {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type; o.frequency.value = freq; g.gain.value = vol;
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch(e) {}
+}
+const SFX = {
+  move:     () => beep(220, 0.03),
+  rotate:   () => beep(330, 0.03),
+  lock:     () => beep(110, 0.08, 'triangle'),
+  drop:     () => beep(80, 0.12, 'triangle', 0.1),
+  clear:    () => { beep(523,0.07); setTimeout(()=>beep(659,0.07),80); setTimeout(()=>beep(784,0.1),160); },
+  tetris:   () => { beep(523,0.07); setTimeout(()=>beep(659,0.07),60); setTimeout(()=>beep(784,0.07),120); setTimeout(()=>beep(1047,0.15),180); },
+  levelUp:  () => { for(let i=0;i<5;i++) setTimeout(()=>beep(440+i*110,0.07),i*60); },
+  over:     () => { beep(400,0.15); setTimeout(()=>beep(300,0.15),150); setTimeout(()=>beep(200,0.25),300); },
+  ctrl:     () => { beep(880,0.05); setTimeout(()=>beep(660,0.06),50); },
+  throttle: () => { beep(150,0.2,'sawtooth',0.1); setTimeout(()=>beep(100,0.3,'sawtooth',0.08),150); },
+  gigawatt: () => { for(let i=0;i<8;i++) setTimeout(()=>beep(300+i*120,0.06,'square',0.09),i*40); },
+  powerWarn:() => beep(600, 0.04, 'square', 0.04),
+};
+
+// ─── Utilities ───
+function hexRgb(h){return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
+function rgbHex(r,g,b){return'#'+[r,g,b].map(c=>Math.max(0,Math.min(255,Math.round(c))).toString(16).padStart(2,'0')).join('');}
+function lighten(h,a){const[r,g,b]=hexRgb(h);return rgbHex(r+a,g+a,b+a);}
+function darken(h,a){const[r,g,b]=hexRgb(h);return rgbHex(r-a,g-a,b-a);}
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+function rotMat(m){const R=m.length,C=m[0].length,o=[];for(let j=0;j<C;j++){o[j]=[];for(let i=R-1;i>=0;i--)o[j][R-1-i]=m[i][j];}return o;}
+
+// ─── State ───
+const ST = { MENU:0, PLAY:1, PAUSE:2, OVER:3 };
+let state = ST.MENU;
+let board, piece, nextType, holdType, canHold, bag, score, highScore, lines, level;
+let dropTimer, lockTimer, clearRows, clearTimer, forceCtrl;
+let particles, msg, msgTimer, msgColor, frame;
+let power, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
+let gigawattPending, ctrlPlaneRows;
+let currentDC = 0;
+
+highScore = parseInt(localStorage.getItem('ccHS') || '0');
+
+function resetState() {
+  board = Array.from({length:ROWS}, ()=>new Array(COLS).fill(0));
+  score=0; lines=0; level=1; holdType=-1; canHold=true; forceCtrl=false;
+  particles=[]; msg=''; msgTimer=0; dropTimer=0; lockTimer=0;
+  clearRows=[]; clearTimer=0; bag=[]; power=0;
+  shakeTimer=0; shakeX=0; shakeY=0; flashTimer=0; flashColor='#FFF';
+  gigawattPending=false; ctrlPlaneRows=0;
+  const dc = pickRegion();
+  generateInheritedWorkload(dc.cond, true);
+  fillBag(); nextType=pullBag(); spawnNext();
+  showMsg(dc.name, DC_COLORS[dc.cond], 120);
+}
+
+// ─── Piece bag ───
+function fillBag() { bag = shuffle([0,1,2,3,4,5,6]); }
+function pullBag() {
+  if (forceCtrl) { forceCtrl = false; return 7; }
+  if (!bag.length) fillBag();
+  return bag.pop();
+}
+function mkPiece(t) {
+  const d = PIECES[t], s = d.shape.map(r=>[...r]);
+  return { type:t, shape:s, x:Math.floor((COLS-s[0].length)/2), y:0, color:d.color };
+}
+function spawnNext() {
+  piece = mkPiece(nextType);
+  nextType = pullBag();
+  canHold = true; dropTimer = 0; lockTimer = 0;
+  if (piece.type === 7) { showMsg('CTRL PLANE DEPLOYING!', '#E37400', 90); SFX.ctrl(); }
+  if (!isValid(piece.shape, piece.x, piece.y)) gameOver();
+}
+
+// ─── Board ops ───
+function isValid(s, px, py) {
+  for (let y=0; y<s.length; y++) for (let x=0; x<s[y].length; x++)
+    if (s[y][x]) { const bx=px+x, by=py+y;
+      if (bx<0||bx>=COLS||by>=ROWS) return false;
+      if (by>=0 && board[by][bx]) return false; }
+  return true;
+}
+function getGhostY() { let gy=piece.y; while(isValid(piece.shape,piece.x,gy+1)) gy++; return gy; }
+
+// ─── Power system ───
+function addPower(amount) {
+  power = Math.min(MAX_POWER, power + amount);
+  if (power >= MAX_POWER) thermalThrottle();
+}
+function reducePower(amount) { power = Math.max(0, power - amount); }
+
+function thermalThrottle() {
+  showMsg('⚠ THERMAL THROTTLE! ⚠', G.red, 120);
+  SFX.throttle();
+  startShake(15);
+  startFlash('#EA4335', 10);
+  addGarbageRow();
+  power = 45;
+}
+
+function addGarbageRow() {
+  if (board[0].some(c => c !== 0)) { gameOver(); return; }
+  board.shift();
+  const row = new Array(COLS).fill(GARBAGE_ID);
+  const gaps = 2 + Math.floor(Math.random() * 2);
+  const positions = shuffle([...Array(COLS).keys()]).slice(0, gaps);
+  positions.forEach(i => { row[i] = 0; });
+  board.push(row);
+  if (piece && !isValid(piece.shape, piece.x, piece.y)) {
+    piece.y--;
+    if (piece.y < 0 || !isValid(piece.shape, piece.x, piece.y)) gameOver();
+  }
+}
+
+function triggerGigawatt() {
+  showMsg('⚡ GIGAWATT SURGE! ⚡', '#FFD700', 120);
+  SFX.gigawatt();
+  startShake(12);
+  startFlash('#FBBC04', 15);
+  power = 0;
+  let bestRow = -1, bestFill = 0;
+  for (let y = ROWS-1; y >= 0; y--) {
+    if (clearRows.includes(y)) continue;
+    const fill = board[y].filter(c => c !== 0).length;
+    if (fill > bestFill) { bestFill = fill; bestRow = y; }
+  }
+  if (bestRow >= 0 && bestFill >= 3) {
+    clearRows.push(bestRow);
+    spawnParticles(bestRow);
+    score += 200 * level;
+  }
+}
+
+function pickRegion() {
+  let idx;
+  do { idx = Math.floor(Math.random() * DATACENTERS.length); } while (idx === currentDC);
+  currentDC = idx;
+  return DATACENTERS[idx];
+}
+
+function generateInheritedWorkload(cond, isStart) {
+  const cfgs = {
+    clean:    { rows:[0,1], fill:[0.1,0.2] },
+    moderate: { rows:[1,2], fill:[0.2,0.4] },
+    bad:      { rows:[2,4], fill:[0.35,0.55] },
+    terrible: { rows:[3,6], fill:[0.5,0.75] },
+  };
+  const cfg = cfgs[cond];
+  let numRows = cfg.rows[0] + Math.floor(Math.random() * (cfg.rows[1] - cfg.rows[0] + 1));
+  if (!isStart) numRows = Math.min(numRows, 3);
+  for (let i = 0; i < numRows; i++) {
+    if (board[0].some(c => c !== 0)) break;
+    board.shift();
+    const row = new Array(COLS).fill(0);
+    const fp = cfg.fill[0] + Math.random() * (cfg.fill[1] - cfg.fill[0]);
+    for (let c = 0; c < COLS; c++) {
+      if (Math.random() < fp) {
+        const t = Math.floor(Math.random() * 7) + 1;
+        row[c] = t;
+        if (c + 1 < COLS && Math.random() < 0.4) { row[++c] = t; }
+      }
+    }
+    if (row.filter(c => c !== 0).length >= COLS - 1) {
+      const idxs = shuffle([...Array(COLS).keys()]);
+      row[idxs[0]] = 0; row[idxs[1]] = 0;
+    }
+    board.push(row);
+  }
+}
+
+// ─── Movement ───
+function movePiece(dx, dy) {
+  if (!piece) return false;
+  if (isValid(piece.shape, piece.x+dx, piece.y+dy)) {
+    piece.x += dx; piece.y += dy;
+    if (dx !== 0) { SFX.move(); if (!isValid(piece.shape,piece.x,piece.y+1)) lockTimer=30; }
+    return true;
+  }
+  return false;
+}
+function rotatePiece() {
+  if (!piece || piece.type===0) return;
+  const r = rotMat(piece.shape);
+  for (const [dx,dy] of [[0,0],[-1,0],[1,0],[0,-1],[-2,0],[2,0],[0,-2]]) {
+    if (isValid(r, piece.x+dx, piece.y+dy)) {
+      piece.shape=r; piece.x+=dx; piece.y+=dy; SFX.rotate();
+      if (!isValid(piece.shape,piece.x,piece.y+1)) lockTimer=30;
+      return;
+    }
+  }
+}
+function hardDrop() {
+  if (!piece) return;
+  let d=0; while(movePiece(0,1)) d++;
+  score += d*2; SFX.drop(); lockPiece();
+}
+function softDrop() { if (movePiece(0,1)) { score+=1; dropTimer=0; } }
+
+// ─── Lock & Clear ───
+function lockPiece() {
+  if (!piece) return;
+  const s = piece.shape;
+  const lockedType = piece.type;
+  for (let y=0; y<s.length; y++) for (let x=0; x<s[y].length; x++)
+    if (s[y][x]) { const by=piece.y+y, bx=piece.x+x;
+      if (by<0) { gameOver(); return; }
+      board[by][bx] = lockedType+1; }
+  SFX.lock();
+  addPower(PIECES[lockedType].pw);
+  if (lockedType === 5) forceCtrl = true;
+  if (lockedType === 7) {
+    startFlash('#E37400', 8);
+    startShake(6);
+  }
+  clearRows = [];
+  ctrlPlaneRows = 0;
+  for (let y=0; y<ROWS; y++) if (board[y].every(c=>c)) {
+    clearRows.push(y);
+    if (board[y].some(c => c === 8)) ctrlPlaneRows++;
+  }
+  if (clearRows.length) {
+    const n = clearRows.length;
+    if (n >= 3 || (n >= 2 && Math.random() < 0.4)) gigawattPending = true;
+    else gigawattPending = false;
+    clearTimer = 22;
+    clearRows.forEach(y => spawnParticles(y));
+    if (n >= 4) SFX.tetris(); else SFX.clear();
+    reducePower(POWER_REDUCTION[Math.min(n, 4)]);
+  } else { spawnNext(); }
+}
+
+function finishClear() {
+  if (gigawattPending) { gigawattPending = false; triggerGigawatt(); }
+  const n = clearRows.length;
+  for (const y of [...clearRows].sort((a,b)=>b-a)) { board.splice(y,1); board.unshift(new Array(COLS).fill(0)); }
+  let pts = LINE_PTS[Math.min(n, 4)] * level;
+  if (ctrlPlaneRows > 0) {
+    pts += 200 * ctrlPlaneRows * level;
+    showMsg('OVERHEAD ELIMINATED! +' + (200*ctrlPlaneRows*level), '#E37400', 100);
+  } else {
+    const nl = Math.floor((lines+n)/10)+1;
+    if (nl > level) { showMsg('LEVEL '+nl+': '+REGIONS[Math.min(nl-1,9)], G.blue, 120); }
+    else { const cm=CLEAR_MSG[Math.min(n,4)]; if(cm) showMsg(cm[0],cm[1]); }
+  }
+  score += pts;
+  lines += n;
+  const nl = Math.floor(lines/10)+1;
+  if (nl > level) { level=nl; SFX.levelUp(); }
+  clearRows = []; spawnNext();
+}
+
+function doHold() {
+  if (!piece || !canHold) return;
+  canHold = false;
+  if (holdType === -1) { holdType=piece.type; spawnNext(); }
+  else { const t=holdType; holdType=piece.type; piece=mkPiece(t); }
+}
+function gameOver() {
+  state = ST.OVER; SFX.over();
+  if (score > highScore) { highScore=score; localStorage.setItem('ccHS', String(highScore)); }
+}
+function startGame() { state=ST.PLAY; if(!audioCtx)initAudio(); resetState(); }
+
+// ─── Effects ───
+function startShake(dur) { shakeTimer=dur; }
+function startFlash(color, dur) { flashColor=color; flashTimer=dur; }
+
+function spawnParticles(row) {
+  for (let x=0;x<COLS;x++) for (let i=0;i<4;i++)
+    particles.push({ x:BOARD_X+x*CELL+Math.random()*CELL, y:BOARD_Y+row*CELL+Math.random()*CELL,
+      vx:(Math.random()-0.5)*10, vy:-(Math.random()*6+2),
+      color:GCOLORS[Math.floor(Math.random()*4)], life:30+Math.random()*25, size:2+Math.random()*5 });
+}
+function spawnPowerParticles() {
+  for (let i=0;i<20;i++)
+    particles.push({ x:BOARD_X+Math.random()*BOARD_W, y:BOARD_Y+BOARD_H,
+      vx:(Math.random()-0.5)*3, vy:-(Math.random()*8+4),
+      color:Math.random()>0.5?'#FFD700':'#FF6600', life:40+Math.random()*20, size:2+Math.random()*3 });
+}
+function updateParticles() { particles=particles.filter(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=0.2;return --p.life>0;}); }
+function showMsg(t,c='#FFF',d=90) { msg=t; msgColor=c; msgTimer=d; }
+
+// ─── Cell drawing with chip patterns ───
+function drawCell(px, py, color, cellType, ghost) {
+  if (ghost) {
+    ctx.strokeStyle=color; ctx.globalAlpha=0.3; ctx.lineWidth=2;
+    ctx.strokeRect(px+2,py+2,CELL-4,CELL-4); ctx.globalAlpha=1; ctx.lineWidth=1;
+    return;
+  }
+  // Base fill
+  ctx.fillStyle=color; ctx.fillRect(px,py,CELL,CELL);
+  // 3D edges
+  ctx.fillStyle=lighten(color,50); ctx.fillRect(px,py,CELL,2); ctx.fillRect(px,py,2,CELL);
+  ctx.fillStyle=darken(color,60); ctx.fillRect(px,py+CELL-2,CELL,2); ctx.fillRect(px+CELL-2,py,2,CELL);
+
+  // Chip-specific internal patterns
+  const dc = darken(color, 25);
+  const lc = lighten(color, 30);
+  ctx.fillStyle = dc;
+
+  if (cellType >= 1 && cellType <= 3) {
+    // VM chips: IC pins on edges + central die
+    // Top pins
+    for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+1, 3, 3);
+    // Bottom pins
+    for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+CELL-4, 3, 3);
+    // Left pins
+    for (let i=0;i<3;i++) ctx.fillRect(px+1, py+5+i*8, 3, 2);
+    // Right pins
+    for (let i=0;i<3;i++) ctx.fillRect(px+CELL-4, py+5+i*8, 3, 2);
+    // Central die
+    ctx.fillStyle = lighten(color, 15);
+    ctx.fillRect(px+7, py+7, CELL-14, CELL-14);
+    // Die corner marker
+    ctx.fillStyle = lc;
+    ctx.fillRect(px+9, py+9, 3, 3);
+  }
+  else if (cellType === 4) {
+    // GPU: parallel horizontal lines (CUDA cores)
+    ctx.fillStyle = lighten(color, 20);
+    for (let i=0;i<5;i++) {
+      ctx.fillRect(px+4, py+4+i*5, CELL-8, 2);
+    }
+    // Vertical bus bars
+    ctx.fillStyle = dc;
+    ctx.fillRect(px+6, py+3, 2, CELL-6);
+    ctx.fillRect(px+CELL-8, py+3, 2, CELL-6);
+  }
+  else if (cellType === 5) {
+    // TPU: systolic array dot grid
+    ctx.fillStyle = lighten(color, 35);
+    for (let r=0;r<4;r++) for (let c=0;c<4;c++) {
+      ctx.fillRect(px+4+c*6, py+4+r*6, 3, 3);
+    }
+    // Border trace
+    ctx.fillStyle = dc;
+    ctx.fillRect(px+3, py+3, CELL-6, 1);
+    ctx.fillRect(px+3, py+CELL-4, CELL-6, 1);
+    ctx.fillRect(px+3, py+3, 1, CELL-6);
+    ctx.fillRect(px+CELL-4, py+3, 1, CELL-6);
+  }
+  else if (cellType === 6) {
+    // GKE Node: kubernetes-inspired diamond/wheel
+    ctx.fillStyle = lc;
+    // Diamond shape in center
+    ctx.fillRect(px+12, py+5, 4, 4);
+    ctx.fillRect(px+10, py+9, 8, 4);
+    ctx.fillRect(px+8, py+13, 12, 4);
+    ctx.fillRect(px+10, py+17, 8, 4);
+    ctx.fillRect(px+12, py+21, 4, 3);
+    // Spokes
+    ctx.fillStyle = dc;
+    ctx.fillRect(px+13, py+3, 2, 22);
+    ctx.fillRect(px+5, py+13, 18, 2);
+  }
+  else if (cellType === 7) {
+    // K8s Pod: dashed container border
+    ctx.fillStyle = lc;
+    // Dashed top
+    for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+4, 4, 2);
+    // Dashed bottom
+    for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+CELL-6, 4, 2);
+    // Dashed left
+    for (let i=0;i<3;i++) ctx.fillRect(px+4, py+6+i*7, 2, 4);
+    // Dashed right
+    for (let i=0;i<3;i++) ctx.fillRect(px+CELL-6, py+6+i*7, 2, 4);
+    // Center dot
+    ctx.fillRect(px+12, py+12, 4, 4);
+  }
+  else if (cellType === 8) {
+    // Ctrl Plane: circuit traces + warning
+    ctx.fillStyle = darken(color, 15);
+    // Circuit traces (right-angle paths)
+    ctx.fillRect(px+4, py+8, 10, 2);
+    ctx.fillRect(px+12, py+8, 2, 8);
+    ctx.fillRect(px+12, py+14, 10, 2);
+    ctx.fillRect(px+4, py+18, 2, 6);
+    ctx.fillRect(px+18, py+4, 2, 12);
+    // Warning stripes
+    ctx.fillStyle = lighten(color, 40);
+    ctx.fillRect(px+4, py+4, 6, 2);
+    ctx.fillRect(px+20, py+CELL-6, 4, 2);
+  }
+  else if (cellType === GARBAGE_ID) {
+    // Garbage: crosshatch blocked pattern
+    ctx.fillStyle = darken(GARBAGE_COLOR, 20);
+    // X pattern
+    for (let i=0;i<CELL-4;i+=4) {
+      ctx.fillRect(px+2+i, py+2+i, 3, 3);
+      ctx.fillRect(px+CELL-5-i, py+2+i, 3, 3);
+    }
+    // Border warning marks
+    ctx.fillStyle = '#EA4335';
+    ctx.fillRect(px+2, py+2, CELL-4, 1);
+    ctx.fillRect(px+2, py+CELL-3, CELL-4, 1);
+  }
+}
+
+function drawBoard() {
+  // Board background
+  ctx.fillStyle='#16162A'; ctx.fillRect(BOARD_X,BOARD_Y,BOARD_W,BOARD_H);
+  // Grid
+  ctx.strokeStyle='#22223A'; ctx.lineWidth=1;
+  for (let x=0;x<=COLS;x++){ctx.beginPath();ctx.moveTo(BOARD_X+x*CELL,BOARD_Y);ctx.lineTo(BOARD_X+x*CELL,BOARD_Y+BOARD_H);ctx.stroke();}
+  for (let y=0;y<=ROWS;y++){ctx.beginPath();ctx.moveTo(BOARD_X,BOARD_Y+y*CELL);ctx.lineTo(BOARD_X+BOARD_W,BOARD_Y+y*CELL);ctx.stroke();}
+  // Cells
+  for (let y=0;y<ROWS;y++) for (let x=0;x<COLS;x++) {
+    const v = board[y][x];
+    if (v) {
+      const color = v === GARBAGE_ID ? GARBAGE_COLOR : PIECES[v-1].color;
+      drawCell(BOARD_X+x*CELL, BOARD_Y+y*CELL, color, v);
+    }
+  }
+  // Clearing flash
+  if (clearTimer > 0) {
+    const fl=Math.floor(clearTimer/3)%2===0;
+    clearRows.forEach(y=>{
+      ctx.fillStyle=fl?'#FFFFFF':'#E8EAED';
+      ctx.fillRect(BOARD_X,BOARD_Y+y*CELL,BOARD_W,CELL);
+    });
+  }
+  // Board border (color changes with power)
+  const borderColor = power > 80 ? G.red : power > 55 ? G.yellow : G.border;
+  ctx.strokeStyle=borderColor; ctx.lineWidth=2;
+  ctx.strokeRect(BOARD_X-1,BOARD_Y-1,BOARD_W+2,BOARD_H+2);
+  // Pulsing border glow at high power
+  if (power > 70) {
+    const pulse = 0.15 + 0.15 * Math.sin(frame * 0.15);
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = G.red;
+    ctx.lineWidth = 4;
+    ctx.strokeRect(BOARD_X-3,BOARD_Y-3,BOARD_W+6,BOARD_H+6);
+    ctx.globalAlpha = 1;
+  }
+  ctx.lineWidth=1;
+}
+
+function drawPiece() {
+  if (!piece || clearTimer>0) return;
+  const gy = getGhostY();
+  if (gy !== piece.y) {
+    for (let y=0;y<piece.shape.length;y++) for (let x=0;x<piece.shape[y].length;x++)
+      if (piece.shape[y][x] && gy+y>=0)
+        drawCell(BOARD_X+(piece.x+x)*CELL, BOARD_Y+(gy+y)*CELL, piece.color, piece.type+1, true);
+  }
+  for (let y=0;y<piece.shape.length;y++) for (let x=0;x<piece.shape[y].length;x++)
+    if (piece.shape[y][x] && piece.y+y>=0)
+      drawCell(BOARD_X+(piece.x+x)*CELL, BOARD_Y+(piece.y+y)*CELL, piece.color, piece.type+1);
+}
+
+function drawPreview(type, x, y, label) {
+  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.textAlign='left';
+  ctx.fillText(label, x, y);
+  if (type<0) { ctx.fillStyle='#3A3A4A'; ctx.font='6px "Press Start 2P",monospace'; ctx.fillText('EMPTY',x+16,y+40); return; }
+  if (type===7) { ctx.fillStyle='#E37400'; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText('REQUIRED!',x,y+12); }
+  const d=PIECES[type], s=d.shape, bw=s[0].length*14, bh=s.length*14;
+  const ox=x+(80-bw)/2, oy=y+16+(44-bh)/2;
+  for (let r=0;r<s.length;r++) for (let c=0;c<s[r].length;c++) if(s[r][c]) {
+    const cpx=ox+c*14, cpy=oy+r*14;
+    ctx.fillStyle=d.color; ctx.fillRect(cpx,cpy,13,13);
+    ctx.fillStyle=lighten(d.color,40); ctx.fillRect(cpx,cpy,13,2); ctx.fillRect(cpx,cpy,2,13);
+    ctx.fillStyle=darken(d.color,50); ctx.fillRect(cpx,cpy+11,13,2); ctx.fillRect(cpx+11,cpy,2,13);
+    // Mini chip pattern
+    if (type<=2) { ctx.fillStyle=darken(d.color,20); ctx.fillRect(cpx+4,cpy+4,5,5); }
+    else if (type===3) { ctx.fillStyle=lighten(d.color,25); for(let i=0;i<3;i++) ctx.fillRect(cpx+3,cpy+3+i*3,7,1); }
+    else if (type===4) { ctx.fillStyle=lighten(d.color,30); for(let r2=0;r2<3;r2++) for(let c2=0;c2<3;c2++) ctx.fillRect(cpx+2+c2*3,cpy+2+r2*3,2,2); }
+    else if (type===5) { ctx.fillStyle=lighten(d.color,25); ctx.fillRect(cpx+5,cpy+3,3,7); ctx.fillRect(cpx+3,cpy+5,7,3); }
+    else if (type===6) { ctx.fillStyle=lighten(d.color,25); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+3,2,1); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+9,2,1); }
+    else if (type===7) { ctx.fillStyle=darken(d.color,15); ctx.fillRect(cpx+3,cpy+5,7,1); ctx.fillRect(cpx+5,cpy+3,1,7); }
+  }
+  ctx.fillStyle=d.color; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(d.name,x,oy+bh+12);
+}
+
+function drawPowerBar() {
+  const bx=BOARD_X, by=BOARD_Y-16, bw=BOARD_W, bh=10;
+  // Label
+  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace'; ctx.textAlign='left';
+  ctx.fillText('POWER', bx, by-3);
+  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace'; ctx.textAlign='right';
+  ctx.fillText(power+'W', bx+bw, by-3);
+  ctx.textAlign='left';
+  // Background
+  ctx.fillStyle='#303134'; ctx.fillRect(bx,by,bw,bh);
+  // Fill
+  const pct = power / MAX_POWER;
+  let barColor;
+  if (pct > 0.8) barColor = G.red;
+  else if (pct > 0.55) barColor = G.yellow;
+  else barColor = G.green;
+  ctx.fillStyle = barColor;
+  ctx.fillRect(bx, by, bw * pct, bh);
+  // Segments
+  ctx.fillStyle = '#202124';
+  for (let i=1;i<10;i++) ctx.fillRect(bx+i*(bw/10), by, 1, bh);
+  // Border
+  ctx.strokeStyle = pct > 0.8 ? G.red : '#5F6368';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx, by, bw, bh);
+  // Danger zone marker
+  ctx.fillStyle = 'rgba(234,67,53,0.3)';
+  ctx.fillRect(bx + bw*0.8, by, bw*0.2, bh);
+  // Lightning bolt at high power
+  if (power > 70 && Math.floor(frame/10)%2===0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = '7px "Press Start 2P",monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('⚡', bx+bw+16, by+9);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawSidebar() {
+  const sx=SIDEBAR_X;
+  ctx.textAlign='left';
+  // Score
+  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('SCORE',sx,90);
+  ctx.fillStyle=G.text; ctx.font='11px "Press Start 2P",monospace'; ctx.fillText(String(score).padStart(7,'0'),sx,108);
+  ctx.fillStyle=G.dim; ctx.font='6px "Press Start 2P",monospace'; ctx.fillText('HI '+String(highScore).padStart(7,'0'),sx,124);
+  // Level
+  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('LEVEL',sx,148);
+  ctx.fillStyle=G.blue; ctx.font='14px "Press Start 2P",monospace'; ctx.fillText(String(level),sx,168);
+  ctx.fillStyle=G.green; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(REGIONS[Math.min(level-1,9)],sx,182);
+  // Lines
+  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('LINES',sx,204);
+  ctx.fillStyle=G.text; ctx.font='11px "Press Start 2P",monospace'; ctx.fillText(String(lines),sx,222);
+  // Next & Hold
+  drawPreview(nextType, sx, 248, 'NEXT');
+  drawPreview(holdType, sx, 340, 'HOLD [C]');
+  // Current piece info
+  if (piece) {
+    const d=PIECES[piece.type];
+    ctx.fillStyle=d.color; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(d.name,sx,440);
+    ctx.fillStyle=G.dim; ctx.fillText(d.desc,sx,453);
+    // Power cost indicator
+    ctx.fillStyle=d.pw>=10?G.red:d.pw>=7?G.yellow:G.green;
+    ctx.fillText('PWR: +'+d.pw+'W',sx,466);
+  }
+  // Google bar
+  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(sx+i*40,485,40,3); });
+  // Controls
+  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace';
+  ctx.fillText('←→ MOVE  ↑ ROT',sx,510);
+  ctx.fillText('↓ SOFT  SPC DROP',sx,524);
+  ctx.fillText('C HOLD  P PAUSE',sx,538);
+  // Speed bar
+  const spd = Math.max(3,48-(level-1)*4);
+  const pct = Math.round((1-spd/48)*100);
+  ctx.fillText('SPEED',sx,562);
+  ctx.fillStyle='#303134'; ctx.fillRect(sx,568,160,6);
+  ctx.fillStyle=pct>80?G.red:pct>50?G.yellow:G.green; ctx.fillRect(sx,568,160*pct/100,6);
+  // Power tips
+  ctx.fillStyle=G.dim; ctx.font='4px "Press Start 2P",monospace';
+  ctx.fillText('CLEAR LINES = COOLING',sx,594);
+  ctx.fillText('100W = THERMAL THROTTLE',sx,606);
+  ctx.fillText('3+ LINES = GIGAWATT SURGE',sx,618);
+}
+
+function drawParticles() {
+  particles.forEach(p=>{ctx.globalAlpha=Math.max(0,p.life/40);ctx.fillStyle=p.color;ctx.fillRect(p.x,p.y,p.size,p.size);});
+  ctx.globalAlpha=1;
+}
+
+function drawMsg() {
+  if (msgTimer<=0) return;
+  ctx.save();
+  const alpha = Math.min(1, msgTimer/20);
+  ctx.globalAlpha=alpha;
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.fillRect(BOARD_X, BOARD_Y+BOARD_H/2-22, BOARD_W, 36);
+  ctx.fillStyle=msgColor; ctx.font='8px "Press Start 2P",monospace'; ctx.textAlign='center';
+  ctx.fillText(msg, BOARD_X+BOARD_W/2, BOARD_Y+BOARD_H/2+2);
+  ctx.restore(); ctx.textAlign='left';
+}
+
+function drawHeader() {
+  ctx.font='11px "Press Start 2P",monospace'; ctx.textAlign='left';
+  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',BOARD_X,24);
+  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',BOARD_X+10,42);
+}
+
+function drawFlash() {
+  if (flashTimer <= 0) return;
+  ctx.globalAlpha = flashTimer / 20;
+  ctx.fillStyle = flashColor;
+  ctx.fillRect(0, 0, CW, CH);
+  ctx.globalAlpha = 1;
+}
+
+// ─── Screens ───
+function drawTitle() {
+  ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
+  // Animated background blocks with chip patterns
+  for (let i=0;i<30;i++) {
+    const bx=((i*67+frame*0.2)%(CW+60))-30;
+    const by=((i*43+80)%(CH-100))+50;
+    ctx.globalAlpha=0.12; const c=GCOLORS[i%4]; const sz=14+i%3*8;
+    ctx.fillStyle=c; ctx.fillRect(bx,by,sz,sz);
+    ctx.fillStyle=lighten(c,40); ctx.fillRect(bx,by,sz,2); ctx.fillRect(bx,by,2,sz);
+    ctx.fillStyle=darken(c,40); ctx.fillRect(bx+sz-2,by,2,sz); ctx.fillRect(bx,by+sz-2,sz,2);
+    // Mini pins
+    if (sz>16) { ctx.fillStyle=darken(c,20); for(let p=0;p<3;p++) ctx.fillRect(bx+3+p*4,by+1,2,2); }
+  }
+  ctx.globalAlpha=1;
+  const cx=CW/2;
+  ctx.textAlign='center';
+  // Shadow
+  ctx.fillStyle='#000'; ctx.font='24px "Press Start 2P",monospace';
+  ctx.fillText('CAPACITY',cx+2,152); ctx.fillText('CRUNCHING',cx+2,192);
+  // Title
+  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',cx,150);
+  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',cx,190);
+  // Subtitle
+  ctx.fillStyle=G.dim; ctx.font='7px "Press Start 2P",monospace';
+  ctx.fillText('Stack. Optimize. Deploy.',cx,226);
+  // Google bar
+  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(cx-100+i*50,240,50,4);});
+  // Piece showcase with chip details
+  const showcase = [
+    [0,'VM',G.blue],[3,'GPU',G.yellow],[4,'TPU','#7BAAF7'],[5,'GKE',G.green]
+  ];
+  showcase.forEach(([t,label,c],i) => {
+    const ox=cx-130+i*80, oy=280;
+    ctx.fillStyle=c; ctx.font='7px "Press Start 2P",monospace'; ctx.fillText(label,ox+15,oy);
+    const d=PIECES[t], s=d.shape;
+    for(let r=0;r<s.length;r++) for(let cc=0;cc<s[r].length;cc++) if(s[r][cc]) {
+      const px=ox+cc*12, py=oy+8+r*12;
+      ctx.fillStyle=d.color; ctx.fillRect(px,py,11,11);
+      ctx.fillStyle=lighten(d.color,35); ctx.fillRect(px,py,11,1); ctx.fillRect(px,py,1,11);
+      ctx.fillStyle=darken(d.color,35); ctx.fillRect(px,py+10,11,1); ctx.fillRect(px+10,py,1,11);
+      if(t<=2){ctx.fillStyle=darken(d.color,15);ctx.fillRect(px+3,py+3,5,5);}
+      else if(t===3){ctx.fillStyle=lighten(d.color,20);for(let l=0;l<3;l++)ctx.fillRect(px+2,py+2+l*3,7,1);}
+      else if(t===4){ctx.fillStyle=lighten(d.color,30);for(let r2=0;r2<3;r2++)for(let c2=0;c2<3;c2++)ctx.fillRect(px+1+c2*3,py+1+r2*3,2,2);}
+      else if(t===5){ctx.fillStyle=lighten(d.color,20);ctx.fillRect(px+4,py+2,3,7);ctx.fillRect(px+2,py+4,7,3);}
+    }
+  });
+
+  // Feature descriptions
+  ctx.font='5px "Press Start 2P",monospace';
+  ctx.fillStyle='#E37400'; ctx.fillText('⚡ POWER SYSTEM: EACH CHIP COSTS WATTS',cx,360);
+  ctx.fillStyle=G.red; ctx.fillText('100W = THERMAL THROTTLE (GREY BAND!)',cx,376);
+  ctx.fillStyle='#FFD700'; ctx.fillText('3+ LINE CLEAR = GIGAWATT SURGE BONUS!',cx,392);
+  ctx.fillStyle=G.green; ctx.fillText('GKE NODES FORCE A CONTROL PLANE NEXT',cx,408);
+  ctx.fillStyle=G.dim; ctx.fillText('CLEAR CTRL PLANE ROWS = BONUS POINTS',cx,424);
+
+  // Blink
+  if (Math.floor(frame/30)%2===0) {
+    ctx.fillStyle=G.yellow; ctx.font='10px "Press Start 2P",monospace';
+    ctx.fillText('PRESS ENTER',cx,480);
+    ctx.fillText('TO DEPLOY',cx,500);
+  }
+  // Controls
+  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace';
+  ctx.fillText('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP',cx,550);
+  ctx.fillText('SPACE HARD DROP   C HOLD   P PAUSE',cx,566);
+  // High score
+  if (highScore>0) { ctx.fillStyle=G.yellow; ctx.font='7px "Press Start 2P",monospace';
+    ctx.fillText('HIGH SCORE: '+highScore,cx,620); }
+  ctx.textAlign='left';
+}
+
+function drawPause() {
+  ctx.fillStyle='rgba(32,33,36,0.88)'; ctx.fillRect(0,0,CW,CH);
+  ctx.textAlign='center';
+  ctx.fillStyle=G.yellow; ctx.font='18px "Press Start 2P",monospace'; ctx.fillText('PAUSED',CW/2,300);
+  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace';
+  ctx.fillText('PRESS P TO RESUME',CW/2,340);
+  ctx.fillText('PRESS Q TO QUIT',CW/2,360);
+  ctx.textAlign='left';
+}
+
+function drawOver() {
+  ctx.fillStyle='rgba(32,33,36,0.92)'; ctx.fillRect(0,0,CW,CH);
+  ctx.textAlign='center';
+  ctx.fillStyle=G.red; ctx.font='16px "Press Start 2P",monospace';
+  ctx.fillText('CLUSTER',CW/2,220); ctx.fillText('OVERLOADED!',CW/2,250);
+  ctx.fillStyle=G.dim; ctx.font='7px "Press Start 2P",monospace';
+  ctx.fillText('Resources Exhausted',CW/2,280);
+  ctx.fillStyle=G.text; ctx.font='10px "Press Start 2P",monospace';
+  ctx.fillText('SCORE: '+score,CW/2,320);
+  ctx.fillText('LINES: '+lines,CW/2,350);
+  ctx.fillText('LEVEL: '+level,CW/2,380);
+  ctx.fillStyle=G.green; ctx.font='6px "Press Start 2P",monospace';
+  ctx.fillText(REGIONS[Math.min(level-1,9)],CW/2,400);
+  // Power stats
+  ctx.fillStyle='#E37400'; ctx.font='7px "Press Start 2P",monospace';
+  ctx.fillText('PEAK POWER: '+power+'W',CW/2,430);
+
+  if (score>=highScore && score>0) {
+    ctx.fillStyle=G.yellow; ctx.font='9px "Press Start 2P",monospace';
+    const pulse = 0.7 + 0.3*Math.sin(frame*0.1);
+    ctx.globalAlpha=pulse; ctx.fillText('★ NEW HIGH SCORE ★',CW/2,465); ctx.globalAlpha=1;
+  }
+  if (Math.floor(frame/30)%2===0) {
+    ctx.fillStyle=G.green; ctx.font='9px "Press Start 2P",monospace';
+    ctx.fillText('PRESS ENTER TO',CW/2,510); ctx.fillText('REPROVISION',CW/2,535);
+  }
+  ctx.textAlign='left';
+}
+
+// ─── Update ───
+function update() {
+  frame++;
+  if (state!==ST.PLAY) return;
+  updateParticles();
+  if (msgTimer>0) msgTimer--;
+  if (shakeTimer>0) { shakeTimer--; shakeX=(Math.random()-0.5)*6; shakeY=(Math.random()-0.5)*6; }
+  else { shakeX=0; shakeY=0; }
+  if (flashTimer>0) flashTimer--;
+  // Power warning beep
+  if (power > 80 && frame % 60 === 0) SFX.powerWarn();
+  if (clearTimer>0) { clearTimer--; if(!clearTimer) finishClear(); return; }
+  if (!piece) return;
+  dropTimer++;
+  const spd = Math.max(3, 48-(level-1)*4);
+  if (dropTimer>=spd) { dropTimer=0; if(!movePiece(0,1)) { if(lockTimer<=0) lockTimer=30; } }
+  if (!isValid(piece.shape,piece.x,piece.y+1)) { if(lockTimer>0){lockTimer--;if(lockTimer<=0)lockPiece();} }
+  else lockTimer=0;
+}
+
+// ─── Draw frame ───
+function draw() {
+  ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
+  switch(state) {
+    case ST.MENU: drawTitle(); break;
+    case ST.PLAY:
+      ctx.save(); ctx.translate(shakeX, shakeY);
+      drawHeader(); drawPowerBar(); drawBoard(); drawPiece(); drawParticles(); drawMsg(); drawSidebar();
+      ctx.restore();
+      drawFlash();
+      break;
+    case ST.PAUSE:
+      drawHeader(); drawPowerBar(); drawBoard(); drawSidebar(); drawPause(); break;
+    case ST.OVER:
+      drawHeader(); drawBoard(); drawParticles(); drawSidebar(); drawOver(); break;
+  }
+}
+
+// ─── Input ───
+document.addEventListener('keydown', e => {
+  if (state===ST.MENU) { if(e.key==='Enter'){startGame();e.preventDefault();} return; }
+  if (state===ST.OVER) { if(e.key==='Enter'){state=ST.MENU;e.preventDefault();} return; }
+  if (state===ST.PAUSE) {
+    if(e.key==='p'||e.key==='P') state=ST.PLAY;
+    if(e.key==='q'||e.key==='Q') state=ST.MENU;
+    return;
+  }
+  if (state===ST.PLAY && clearTimer<=0) {
+    switch(e.key) {
+      case 'ArrowLeft': movePiece(-1,0); break;
+      case 'ArrowRight': movePiece(1,0); break;
+      case 'ArrowDown': softDrop(); break;
+      case 'ArrowUp': rotatePiece(); break;
+      case ' ': hardDrop(); break;
+      case 'c': case 'C': doHold(); break;
+      case 'p': case 'P': state=ST.PAUSE; break;
+    }
+  }
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state===ST.PLAY) state=ST.PAUSE; });
+
+// ─── Loop ───
+frame = 0;
+(function loop() { update(); draw(); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>
