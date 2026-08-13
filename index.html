@@ -4,11 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CAPACITY CRUNCHING</title>
-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen:wght@400;700&family=VT323&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: #171717;
+    background: #121314;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -20,32 +22,46 @@
     position: relative;
     display: inline-block;
     border: 4px solid #5F6368;
-    border-radius: 8px;
-    box-shadow: 0 0 30px rgba(66,133,244,0.3), 0 0 80px rgba(66,133,244,0.1),
-                inset 0 0 60px rgba(0,0,0,0.5);
+    border-radius: 10px;
+    box-shadow: 0 0 35px rgba(66,133,244,0.35), 0 0 90px rgba(66,133,244,0.12),
+                inset 0 0 60px rgba(0,0,0,0.6);
   }
-  canvas { display: block; background: #202124; border-radius: 4px; }
+  canvas { display: block; background: #202124; border-radius: 6px; }
   #scanlines {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 6px);
-    pointer-events: none; border-radius: 4px;
+    pointer-events: none; border-radius: 6px;
   }
 </style>
 </head>
 <body>
 <div id="screen">
-  <canvas id="game" width="520" height="700"></canvas>
+  <canvas id="game" width="580" height="720"></canvas>
   <div id="scanlines"></div>
 </div>
 <script>
+// ─── Dreamlo Leaderboard Configuration ───
+// To connect to a live public Dreamlo leaderboard:
+// 1. Visit http://dreamlo.com and generate your free Public and Private codes.
+// 2. Paste them below. If left empty, a resilient local leaderboard (localStorage) is used!
+const LEADERBOARD_CONFIG = {
+  enabled: true,
+  dreamloPublicCode: '',  // e.g. '66bc1234...'
+  dreamloPrivateCode: '', // e.g. 'AbCdEfGhIjKl...'
+};
+
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const CW = 520, CH = 700;
+const CW = 580, CH = 720;
 
 const COLS = 10, ROWS = 20, CELL = 28;
-const BOARD_X = 18, BOARD_Y = 74;
+const BOARD_X = 20, BOARD_Y = 80;
 const BOARD_W = COLS * CELL, BOARD_H = ROWS * CELL;
-const SIDEBAR_X = BOARD_X + BOARD_W + 20;
+const SIDEBAR_X = BOARD_X + BOARD_W + 24;
+
+const F_PIXEL = '"Press Start 2P", monospace';
+const F_RETRO = '"VT323", monospace';
+const F_SILK = '"Silkscreen", monospace';
 
 const G = { blue:'#4285F4', red:'#EA4335', yellow:'#FBBC04', green:'#34A853',
             bg:'#202124', surface:'#303134', text:'#E8EAED', dim:'#9AA0A6', border:'#5F6368' };
@@ -117,6 +133,8 @@ const SFX = {
   throttle: () => { beep(150,0.2,'sawtooth',0.1); setTimeout(()=>beep(100,0.3,'sawtooth',0.08),150); },
   gigawatt: () => { for(let i=0;i<8;i++) setTimeout(()=>beep(300+i*120,0.06,'square',0.09),i*40); },
   powerWarn:() => beep(600, 0.04, 'square', 0.04),
+  charSelect:() => beep(480, 0.04, 'triangle'),
+  submit:   () => { beep(523,0.08); setTimeout(()=>beep(659,0.08),70); setTimeout(()=>beep(880,0.15),140); },
 };
 
 // ─── Utilities ───
@@ -127,9 +145,101 @@ function darken(h,a){const[r,g,b]=hexRgb(h);return rgbHex(r-a,g-a,b-a);}
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 function rotMat(m){const R=m.length,C=m[0].length,o=[];for(let j=0;j<C;j++){o[j]=[];for(let i=R-1;i>=0;i--)o[j][R-1-i]=m[i][j];}return o;}
 
+// ─── Leaderboard Engine (Dreamlo + LocalStorage) ───
+const DEFAULT_SCORES = [
+  { name:'GKE', score:24500, region:'GLOBAL' },
+  { name:'SRE', score:19800, region:'us-central1' },
+  { name:'K8S', score:15200, region:'europe-west1' },
+  { name:'TPU', score:11400, region:'asia-east1' },
+  { name:'BOR', score:8600,  region:'us-west1' },
+  { name:'VMM', score:6200,  region:'us-east1' },
+  { name:'POD', score:4300,  region:'europe-west4' },
+  { name:'NET', score:2800,  region:'australia-se1' },
+  { name:'OPS', score:1500,  region:'southam-east1' },
+  { name:'DEV', score:800,   region:'us-east5' },
+];
+
+let leaderboardData = [];
+let leaderboardLoading = false;
+let leaderboardStatus = '';
+
+function getLocalLeaderboard() {
+  try {
+    const raw = localStorage.getItem('cc_leaderboard_v2');
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return [...DEFAULT_SCORES];
+}
+
+function saveLocalLeaderboard(list) {
+  try {
+    localStorage.setItem('cc_leaderboard_v2', JSON.stringify(list.slice(0, 10)));
+  } catch(e) {}
+}
+
+async function loadLeaderboard() {
+  leaderboardLoading = true;
+  leaderboardStatus = 'FETCHING TELEMETRY...';
+  const localList = getLocalLeaderboard();
+  leaderboardData = localList;
+
+  if (LEADERBOARD_CONFIG.enabled && LEADERBOARD_CONFIG.dreamloPublicCode) {
+    try {
+      const url = `https://www.dreamlo.com/lb/${LEADERBOARD_CONFIG.dreamloPublicCode}/json/10`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.dreamlo && data.dreamlo.leaderboard) {
+          let entries = data.dreamlo.leaderboard.entry;
+          if (entries) {
+            if (!Array.isArray(entries)) entries = [entries];
+            leaderboardData = entries.map(e => ({
+              name: (e.name || '???').toUpperCase().slice(0, 3),
+              score: parseInt(e.score) || 0,
+              region: e.text || 'us-central1'
+            }));
+            leaderboardStatus = 'GLOBAL CLOUD SYNCED';
+            leaderboardLoading = false;
+            return;
+          }
+        }
+      }
+    } catch(err) {
+      console.warn('Dreamlo fetch error, fallback to local', err);
+    }
+  }
+
+  leaderboardStatus = 'LOCAL CLOUD ARCHIVE';
+  leaderboardLoading = false;
+}
+
+async function recordScore(name, scoreNum, regionStr) {
+  const cleanName = (name || 'AAA').toUpperCase().slice(0, 3);
+  const cleanRegion = regionStr || 'us-central1';
+  
+  // Update local
+  let list = getLocalLeaderboard();
+  list.push({ name: cleanName, score: scoreNum, region: cleanRegion });
+  list.sort((a,b) => b.score - a.score);
+  list = list.slice(0, 10);
+  saveLocalLeaderboard(list);
+  leaderboardData = list;
+
+  // Submit to Dreamlo if configured
+  if (LEADERBOARD_CONFIG.enabled && LEADERBOARD_CONFIG.dreamloPrivateCode) {
+    try {
+      const url = `https://www.dreamlo.com/lb/${LEADERBOARD_CONFIG.dreamloPrivateCode}/add/${encodeURIComponent(cleanName)}/${scoreNum}/0/${encodeURIComponent(cleanRegion)}`;
+      await fetch(url);
+    } catch(e) {
+      console.warn('Failed to post to Dreamlo', e);
+    }
+  }
+}
+
 // ─── State ───
-const ST = { MENU:0, PLAY:1, PAUSE:2, OVER:3 };
+const ST = { MENU:0, PLAY:1, PAUSE:2, OVER:3, LEADERBOARD:4, NAME_ENTRY:5 };
 let state = ST.MENU;
+let prevState = ST.MENU;
 let board, piece, nextType, holdType, canHold, bag, score, highScore, lines, level;
 let dropTimer, lockTimer, clearRows, clearTimer, forceCtrl;
 let particles, msg, msgTimer, msgColor, frame;
@@ -137,7 +247,16 @@ let power, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
 let gigawattPending, ctrlPlaneRows;
 let currentDC = 0;
 
+// Name Entry State
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?_";
+let nameChars = ['A', 'A', 'A'];
+let nameCursor = 0;
+
 highScore = parseInt(localStorage.getItem('ccHS') || '0');
+const initialLocal = getLocalLeaderboard();
+if (initialLocal.length > 0 && initialLocal[0].score > highScore) {
+  highScore = initialLocal[0].score;
+}
 
 function resetState() {
   board = Array.from({length:ROWS}, ()=>new Array(COLS).fill(0));
@@ -354,6 +473,7 @@ function doHold() {
   if (holdType === -1) { holdType=piece.type; spawnNext(); }
   else { const t=holdType; holdType=piece.type; piece=mkPiece(t); }
 }
+
 function gameOver() {
   state = ST.OVER; SFX.over();
   if (score > highScore) { highScore=score; localStorage.setItem('ccHS', String(highScore)); }
@@ -398,40 +518,25 @@ function drawCell(px, py, color, cellType, ghost) {
   ctx.fillStyle = dc;
 
   if (cellType >= 1 && cellType <= 3) {
-    // VM chips: IC pins on edges + central die
-    // Top pins
     for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+1, 3, 3);
-    // Bottom pins
     for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+CELL-4, 3, 3);
-    // Left pins
     for (let i=0;i<3;i++) ctx.fillRect(px+1, py+5+i*8, 3, 2);
-    // Right pins
     for (let i=0;i<3;i++) ctx.fillRect(px+CELL-4, py+5+i*8, 3, 2);
-    // Central die
     ctx.fillStyle = lighten(color, 15);
     ctx.fillRect(px+7, py+7, CELL-14, CELL-14);
-    // Die corner marker
     ctx.fillStyle = lc;
     ctx.fillRect(px+9, py+9, 3, 3);
   }
   else if (cellType === 4) {
-    // GPU: parallel horizontal lines (CUDA cores)
     ctx.fillStyle = lighten(color, 20);
-    for (let i=0;i<5;i++) {
-      ctx.fillRect(px+4, py+4+i*5, CELL-8, 2);
-    }
-    // Vertical bus bars
+    for (let i=0;i<5;i++) ctx.fillRect(px+4, py+4+i*5, CELL-8, 2);
     ctx.fillStyle = dc;
     ctx.fillRect(px+6, py+3, 2, CELL-6);
     ctx.fillRect(px+CELL-8, py+3, 2, CELL-6);
   }
   else if (cellType === 5) {
-    // TPU: systolic array dot grid
     ctx.fillStyle = lighten(color, 35);
-    for (let r=0;r<4;r++) for (let c=0;c<4;c++) {
-      ctx.fillRect(px+4+c*6, py+4+r*6, 3, 3);
-    }
-    // Border trace
+    for (let r=0;r<4;r++) for (let c=0;c<4;c++) ctx.fillRect(px+4+c*6, py+4+r*6, 3, 3);
     ctx.fillStyle = dc;
     ctx.fillRect(px+3, py+3, CELL-6, 1);
     ctx.fillRect(px+3, py+CELL-4, CELL-6, 1);
@@ -439,56 +544,41 @@ function drawCell(px, py, color, cellType, ghost) {
     ctx.fillRect(px+CELL-4, py+3, 1, CELL-6);
   }
   else if (cellType === 6) {
-    // GKE Node: kubernetes-inspired diamond/wheel
     ctx.fillStyle = lc;
-    // Diamond shape in center
     ctx.fillRect(px+12, py+5, 4, 4);
     ctx.fillRect(px+10, py+9, 8, 4);
     ctx.fillRect(px+8, py+13, 12, 4);
     ctx.fillRect(px+10, py+17, 8, 4);
     ctx.fillRect(px+12, py+21, 4, 3);
-    // Spokes
     ctx.fillStyle = dc;
     ctx.fillRect(px+13, py+3, 2, 22);
     ctx.fillRect(px+5, py+13, 18, 2);
   }
   else if (cellType === 7) {
-    // K8s Pod: dashed container border
     ctx.fillStyle = lc;
-    // Dashed top
     for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+4, 4, 2);
-    // Dashed bottom
     for (let i=0;i<4;i++) ctx.fillRect(px+4+i*6, py+CELL-6, 4, 2);
-    // Dashed left
     for (let i=0;i<3;i++) ctx.fillRect(px+4, py+6+i*7, 2, 4);
-    // Dashed right
     for (let i=0;i<3;i++) ctx.fillRect(px+CELL-6, py+6+i*7, 2, 4);
-    // Center dot
     ctx.fillRect(px+12, py+12, 4, 4);
   }
   else if (cellType === 8) {
-    // Ctrl Plane: circuit traces + warning
     ctx.fillStyle = darken(color, 15);
-    // Circuit traces (right-angle paths)
     ctx.fillRect(px+4, py+8, 10, 2);
     ctx.fillRect(px+12, py+8, 2, 8);
     ctx.fillRect(px+12, py+14, 10, 2);
     ctx.fillRect(px+4, py+18, 2, 6);
     ctx.fillRect(px+18, py+4, 2, 12);
-    // Warning stripes
     ctx.fillStyle = lighten(color, 40);
     ctx.fillRect(px+4, py+4, 6, 2);
     ctx.fillRect(px+20, py+CELL-6, 4, 2);
   }
   else if (cellType === GARBAGE_ID) {
-    // Garbage: crosshatch blocked pattern
     ctx.fillStyle = darken(GARBAGE_COLOR, 20);
-    // X pattern
     for (let i=0;i<CELL-4;i+=4) {
       ctx.fillRect(px+2+i, py+2+i, 3, 3);
       ctx.fillRect(px+CELL-5-i, py+2+i, 3, 3);
     }
-    // Border warning marks
     ctx.fillStyle = '#EA4335';
     ctx.fillRect(px+2, py+2, CELL-4, 1);
     ctx.fillRect(px+2, py+CELL-3, CELL-4, 1);
@@ -496,13 +586,10 @@ function drawCell(px, py, color, cellType, ghost) {
 }
 
 function drawBoard() {
-  // Board background
   ctx.fillStyle='#16162A'; ctx.fillRect(BOARD_X,BOARD_Y,BOARD_W,BOARD_H);
-  // Grid
   ctx.strokeStyle='#22223A'; ctx.lineWidth=1;
   for (let x=0;x<=COLS;x++){ctx.beginPath();ctx.moveTo(BOARD_X+x*CELL,BOARD_Y);ctx.lineTo(BOARD_X+x*CELL,BOARD_Y+BOARD_H);ctx.stroke();}
   for (let y=0;y<=ROWS;y++){ctx.beginPath();ctx.moveTo(BOARD_X,BOARD_Y+y*CELL);ctx.lineTo(BOARD_X+BOARD_W,BOARD_Y+y*CELL);ctx.stroke();}
-  // Cells
   for (let y=0;y<ROWS;y++) for (let x=0;x<COLS;x++) {
     const v = board[y][x];
     if (v) {
@@ -510,7 +597,6 @@ function drawBoard() {
       drawCell(BOARD_X+x*CELL, BOARD_Y+y*CELL, color, v);
     }
   }
-  // Clearing flash
   if (clearTimer > 0) {
     const fl=Math.floor(clearTimer/3)%2===0;
     clearRows.forEach(y=>{
@@ -518,11 +604,9 @@ function drawBoard() {
       ctx.fillRect(BOARD_X,BOARD_Y+y*CELL,BOARD_W,CELL);
     });
   }
-  // Board border (color changes with power)
   const borderColor = power > 80 ? G.red : power > 55 ? G.yellow : G.border;
   ctx.strokeStyle=borderColor; ctx.lineWidth=2;
   ctx.strokeRect(BOARD_X-1,BOARD_Y-1,BOARD_W+2,BOARD_H+2);
-  // Pulsing border glow at high power
   if (power > 70) {
     const pulse = 0.15 + 0.15 * Math.sin(frame * 0.15);
     ctx.globalAlpha = pulse;
@@ -548,18 +632,17 @@ function drawPiece() {
 }
 
 function drawPreview(type, x, y, label) {
-  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.textAlign='left';
+  ctx.fillStyle=G.dim; ctx.font='10px '+F_PIXEL; ctx.textAlign='left';
   ctx.fillText(label, x, y);
-  if (type<0) { ctx.fillStyle='#3A3A4A'; ctx.font='6px "Press Start 2P",monospace'; ctx.fillText('EMPTY',x+16,y+40); return; }
-  if (type===7) { ctx.fillStyle='#E37400'; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText('REQUIRED!',x,y+12); }
+  if (type<0) { ctx.fillStyle='#4A4A5A'; ctx.font='14px '+F_RETRO; ctx.fillText('[ EMPTY ]',x+12,y+38); return; }
+  if (type===7) { ctx.fillStyle='#E37400'; ctx.font='13px '+F_RETRO; ctx.fillText('! CRITICAL OVERHEAD',x,y+16); }
   const d=PIECES[type], s=d.shape, bw=s[0].length*14, bh=s.length*14;
-  const ox=x+(80-bw)/2, oy=y+16+(44-bh)/2;
+  const ox=x+(84-bw)/2, oy=y+14+(44-bh)/2;
   for (let r=0;r<s.length;r++) for (let c=0;c<s[r].length;c++) if(s[r][c]) {
     const cpx=ox+c*14, cpy=oy+r*14;
     ctx.fillStyle=d.color; ctx.fillRect(cpx,cpy,13,13);
     ctx.fillStyle=lighten(d.color,40); ctx.fillRect(cpx,cpy,13,2); ctx.fillRect(cpx,cpy,2,13);
     ctx.fillStyle=darken(d.color,50); ctx.fillRect(cpx,cpy+11,13,2); ctx.fillRect(cpx+11,cpy,2,13);
-    // Mini chip pattern
     if (type<=2) { ctx.fillStyle=darken(d.color,20); ctx.fillRect(cpx+4,cpy+4,5,5); }
     else if (type===3) { ctx.fillStyle=lighten(d.color,25); for(let i=0;i<3;i++) ctx.fillRect(cpx+3,cpy+3+i*3,7,1); }
     else if (type===4) { ctx.fillStyle=lighten(d.color,30); for(let r2=0;r2<3;r2++) for(let c2=0;c2<3;c2++) ctx.fillRect(cpx+2+c2*3,cpy+2+r2*3,2,2); }
@@ -567,43 +650,33 @@ function drawPreview(type, x, y, label) {
     else if (type===6) { ctx.fillStyle=lighten(d.color,25); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+3,2,1); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+9,2,1); }
     else if (type===7) { ctx.fillStyle=darken(d.color,15); ctx.fillRect(cpx+3,cpy+5,7,1); ctx.fillRect(cpx+5,cpy+3,1,7); }
   }
-  ctx.fillStyle=d.color; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(d.name,x,oy+bh+12);
+  ctx.fillStyle=d.color; ctx.font='14px '+F_RETRO; ctx.fillText(d.name,x,oy+bh+14);
 }
 
 function drawPowerBar() {
-  const bx=BOARD_X, by=BOARD_Y-16, bw=BOARD_W, bh=10;
-  // Label
-  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace'; ctx.textAlign='left';
-  ctx.fillText('POWER', bx, by-3);
-  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace'; ctx.textAlign='right';
-  ctx.fillText(power+'W', bx+bw, by-3);
+  const bx=BOARD_X, by=BOARD_Y-20, bw=BOARD_W, bh=12;
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.textAlign='left';
+  ctx.fillText('POWER RACK', bx, by-4);
+  ctx.fillStyle=power>80?G.red:power>55?G.yellow:G.green; ctx.font='10px '+F_PIXEL; ctx.textAlign='right';
+  ctx.fillText(power+'W / 100W', bx+bw, by-4);
   ctx.textAlign='left';
-  // Background
   ctx.fillStyle='#303134'; ctx.fillRect(bx,by,bw,bh);
-  // Fill
   const pct = power / MAX_POWER;
-  let barColor;
-  if (pct > 0.8) barColor = G.red;
-  else if (pct > 0.55) barColor = G.yellow;
-  else barColor = G.green;
+  let barColor = pct > 0.8 ? G.red : pct > 0.55 ? G.yellow : G.green;
   ctx.fillStyle = barColor;
   ctx.fillRect(bx, by, bw * pct, bh);
-  // Segments
   ctx.fillStyle = '#202124';
   for (let i=1;i<10;i++) ctx.fillRect(bx+i*(bw/10), by, 1, bh);
-  // Border
   ctx.strokeStyle = pct > 0.8 ? G.red : '#5F6368';
   ctx.lineWidth = 1;
   ctx.strokeRect(bx, by, bw, bh);
-  // Danger zone marker
   ctx.fillStyle = 'rgba(234,67,53,0.3)';
   ctx.fillRect(bx + bw*0.8, by, bw*0.2, bh);
-  // Lightning bolt at high power
   if (power > 70 && Math.floor(frame/10)%2===0) {
     ctx.fillStyle = '#FFD700';
-    ctx.font = '7px "Press Start 2P",monospace';
+    ctx.font = '10px '+F_PIXEL;
     ctx.textAlign = 'right';
-    ctx.fillText('⚡', bx+bw+16, by+9);
+    ctx.fillText('⚡', bx+bw+16, by+10);
     ctx.textAlign = 'left';
   }
 }
@@ -611,47 +684,56 @@ function drawPowerBar() {
 function drawSidebar() {
   const sx=SIDEBAR_X;
   ctx.textAlign='left';
-  // Score
-  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('SCORE',sx,90);
-  ctx.fillStyle=G.text; ctx.font='11px "Press Start 2P",monospace'; ctx.fillText(String(score).padStart(7,'0'),sx,108);
-  ctx.fillStyle=G.dim; ctx.font='6px "Press Start 2P",monospace'; ctx.fillText('HI '+String(highScore).padStart(7,'0'),sx,124);
-  // Level
-  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('LEVEL',sx,148);
-  ctx.fillStyle=G.blue; ctx.font='14px "Press Start 2P",monospace'; ctx.fillText(String(level),sx,168);
-  ctx.fillStyle=G.green; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(REGIONS[Math.min(level-1,9)],sx,182);
+  
+  // Score block
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('SCORE',sx,92);
+  ctx.fillStyle='#FFFFFF'; ctx.font='14px '+F_PIXEL; ctx.fillText(String(score).padStart(7,'0'),sx,114);
+  ctx.fillStyle=G.yellow; ctx.font='14px '+F_RETRO; ctx.fillText('TOP: '+String(highScore).padStart(7,'0'),sx,132);
+  
+  // Level & Region
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('LEVEL',sx,156);
+  ctx.fillStyle=G.blue; ctx.font='16px '+F_PIXEL; ctx.fillText(String(level),sx,178);
+  ctx.fillStyle=G.green; ctx.font='15px '+F_RETRO; ctx.fillText(REGIONS[Math.min(level-1,9)],sx+36,178);
+  
   // Lines
-  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace'; ctx.fillText('LINES',sx,204);
-  ctx.fillStyle=G.text; ctx.font='11px "Press Start 2P",monospace'; ctx.fillText(String(lines),sx,222);
-  // Next & Hold
-  drawPreview(nextType, sx, 248, 'NEXT');
-  drawPreview(holdType, sx, 340, 'HOLD [C]');
-  // Current piece info
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('LINES CLEARED',sx,202);
+  ctx.fillStyle=G.text; ctx.font='14px '+F_PIXEL; ctx.fillText(String(lines),sx,224);
+  
+  // Previews
+  drawPreview(nextType, sx, 252, 'NEXT CHIP');
+  drawPreview(holdType, sx, 344, 'HOLD [C]');
+  
+  // Active piece specs
   if (piece) {
     const d=PIECES[piece.type];
-    ctx.fillStyle=d.color; ctx.font='5px "Press Start 2P",monospace'; ctx.fillText(d.name,sx,440);
-    ctx.fillStyle=G.dim; ctx.fillText(d.desc,sx,453);
-    // Power cost indicator
+    ctx.fillStyle=d.color; ctx.font='10px '+F_PIXEL; ctx.fillText(d.name,sx,442);
+    ctx.fillStyle=G.text; ctx.font='15px '+F_RETRO; ctx.fillText(d.desc,sx,460);
     ctx.fillStyle=d.pw>=10?G.red:d.pw>=7?G.yellow:G.green;
-    ctx.fillText('PWR: +'+d.pw+'W',sx,466);
+    ctx.font='15px '+F_RETRO; ctx.fillText('DRAW: +'+d.pw+'W PER PIECE',sx,478);
   }
+  
   // Google bar
-  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(sx+i*40,485,40,3); });
-  // Controls
-  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace';
-  ctx.fillText('←→ MOVE  ↑ ROT',sx,510);
-  ctx.fillText('↓ SOFT  SPC DROP',sx,524);
-  ctx.fillText('C HOLD  P PAUSE',sx,538);
-  // Speed bar
+  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(sx+i*52,492,52,3); });
+  
+  // Controls reference
+  ctx.fillStyle=G.dim; ctx.font='15px '+F_RETRO;
+  ctx.fillText('←→ MOVE    ↑ ROTATE',sx,516);
+  ctx.fillText('↓ SOFT     SPC DROP',sx,534);
+  ctx.fillText('C HOLD     P PAUSE',sx,552);
+  ctx.fillText('L LEADERBOARD',sx,570);
+  
+  // Speed Gauge
   const spd = Math.max(3,48-(level-1)*4);
   const pct = Math.round((1-spd/48)*100);
-  ctx.fillText('SPEED',sx,562);
-  ctx.fillStyle='#303134'; ctx.fillRect(sx,568,160,6);
-  ctx.fillStyle=pct>80?G.red:pct>50?G.yellow:G.green; ctx.fillRect(sx,568,160*pct/100,6);
-  // Power tips
-  ctx.fillStyle=G.dim; ctx.font='4px "Press Start 2P",monospace';
-  ctx.fillText('CLEAR LINES = COOLING',sx,594);
-  ctx.fillText('100W = THERMAL THROTTLE',sx,606);
-  ctx.fillText('3+ LINES = GIGAWATT SURGE',sx,618);
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('SPEED CLOCK',sx,594);
+  ctx.fillStyle='#303134'; ctx.fillRect(sx,602,208,8);
+  ctx.fillStyle=pct>80?G.red:pct>50?G.yellow:G.green; ctx.fillRect(sx,602,208*pct/100,8);
+  
+  // Power Tips
+  ctx.fillStyle=G.dim; ctx.font='14px '+F_RETRO;
+  ctx.fillText('• CLEARS = COOLING WATTS',sx,628);
+  ctx.fillText('• 100W = THERMAL THROTTLE',sx,644);
+  ctx.fillText('• 3+ LINES = GIGAWATT SURGE',sx,660);
 }
 
 function drawParticles() {
@@ -664,17 +746,22 @@ function drawMsg() {
   ctx.save();
   const alpha = Math.min(1, msgTimer/20);
   ctx.globalAlpha=alpha;
-  ctx.fillStyle='rgba(0,0,0,0.6)';
-  ctx.fillRect(BOARD_X, BOARD_Y+BOARD_H/2-22, BOARD_W, 36);
-  ctx.fillStyle=msgColor; ctx.font='8px "Press Start 2P",monospace'; ctx.textAlign='center';
-  ctx.fillText(msg, BOARD_X+BOARD_W/2, BOARD_Y+BOARD_H/2+2);
+  ctx.fillStyle='rgba(10,12,16,0.85)';
+  ctx.fillRect(BOARD_X, BOARD_Y+BOARD_H/2-26, BOARD_W, 48);
+  ctx.strokeStyle=msgColor; ctx.lineWidth=2;
+  ctx.strokeRect(BOARD_X, BOARD_Y+BOARD_H/2-26, BOARD_W, 48);
+  ctx.fillStyle=msgColor; ctx.font='12px '+F_PIXEL; ctx.textAlign='center';
+  ctx.fillText(msg, BOARD_X+BOARD_W/2, BOARD_Y+BOARD_H/2+4);
   ctx.restore(); ctx.textAlign='left';
 }
 
 function drawHeader() {
-  ctx.font='11px "Press Start 2P",monospace'; ctx.textAlign='left';
-  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',BOARD_X,24);
-  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',BOARD_X+10,42);
+  ctx.font='13px '+F_PIXEL; ctx.textAlign='left';
+  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',BOARD_X,28);
+  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',BOARD_X+12,48);
+  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO; ctx.textAlign='right';
+  ctx.fillText('[L] LEADERBOARD  [P] PAUSE',CW-24,38);
+  ctx.textAlign='left';
 }
 
 function drawFlash() {
@@ -688,7 +775,6 @@ function drawFlash() {
 // ─── Screens ───
 function drawTitle() {
   ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
-  // Animated background blocks with chip patterns
   for (let i=0;i<30;i++) {
     const bx=((i*67+frame*0.2)%(CW+60))-30;
     const by=((i*43+80)%(CH-100))+50;
@@ -696,102 +782,234 @@ function drawTitle() {
     ctx.fillStyle=c; ctx.fillRect(bx,by,sz,sz);
     ctx.fillStyle=lighten(c,40); ctx.fillRect(bx,by,sz,2); ctx.fillRect(bx,by,2,sz);
     ctx.fillStyle=darken(c,40); ctx.fillRect(bx+sz-2,by,2,sz); ctx.fillRect(bx,by+sz-2,sz,2);
-    // Mini pins
-    if (sz>16) { ctx.fillStyle=darken(c,20); for(let p=0;p<3;p++) ctx.fillRect(bx+3+p*4,by+1,2,2); }
   }
   ctx.globalAlpha=1;
   const cx=CW/2;
   ctx.textAlign='center';
-  // Shadow
-  ctx.fillStyle='#000'; ctx.font='24px "Press Start 2P",monospace';
-  ctx.fillText('CAPACITY',cx+2,152); ctx.fillText('CRUNCHING',cx+2,192);
+  
+  // Drop Shadow
+  ctx.fillStyle='#000'; ctx.font='26px '+F_PIXEL;
+  ctx.fillText('CAPACITY',cx+3,133); ctx.fillText('CRUNCHING',cx+3,173);
+  
   // Title
-  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',cx,150);
-  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',cx,190);
+  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',cx,130);
+  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',cx,170);
+  
   // Subtitle
-  ctx.fillStyle=G.dim; ctx.font='7px "Press Start 2P",monospace';
-  ctx.fillText('Stack. Optimize. Deploy.',cx,226);
+  ctx.fillStyle=G.text; ctx.font='20px '+F_RETRO;
+  ctx.fillText('STACK • OPTIMIZE • DEPLOY • SCALE',cx,208);
+  
   // Google bar
-  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(cx-100+i*50,240,50,4);});
-  // Piece showcase with chip details
+  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(cx-120+i*60,222,60,4);});
+  
+  // Piece showcase
   const showcase = [
-    [0,'VM',G.blue],[3,'GPU',G.yellow],[4,'TPU','#7BAAF7'],[5,'GKE',G.green]
+    [0,'VM f1',G.blue],[3,'GPU A3',G.yellow],[4,'TPU v5p','#7BAAF7'],[5,'GKE Node',G.green]
   ];
   showcase.forEach(([t,label,c],i) => {
-    const ox=cx-130+i*80, oy=280;
-    ctx.fillStyle=c; ctx.font='7px "Press Start 2P",monospace'; ctx.fillText(label,ox+15,oy);
+    const ox=cx-180+i*95, oy=255;
+    ctx.fillStyle=c; ctx.font='15px '+F_RETRO; ctx.fillText(label,ox+18,oy);
     const d=PIECES[t], s=d.shape;
     for(let r=0;r<s.length;r++) for(let cc=0;cc<s[r].length;cc++) if(s[r][cc]) {
       const px=ox+cc*12, py=oy+8+r*12;
       ctx.fillStyle=d.color; ctx.fillRect(px,py,11,11);
       ctx.fillStyle=lighten(d.color,35); ctx.fillRect(px,py,11,1); ctx.fillRect(px,py,1,11);
       ctx.fillStyle=darken(d.color,35); ctx.fillRect(px,py+10,11,1); ctx.fillRect(px+10,py,1,11);
-      if(t<=2){ctx.fillStyle=darken(d.color,15);ctx.fillRect(px+3,py+3,5,5);}
-      else if(t===3){ctx.fillStyle=lighten(d.color,20);for(let l=0;l<3;l++)ctx.fillRect(px+2,py+2+l*3,7,1);}
-      else if(t===4){ctx.fillStyle=lighten(d.color,30);for(let r2=0;r2<3;r2++)for(let c2=0;c2<3;c2++)ctx.fillRect(px+1+c2*3,py+1+r2*3,2,2);}
-      else if(t===5){ctx.fillStyle=lighten(d.color,20);ctx.fillRect(px+4,py+2,3,7);ctx.fillRect(px+2,py+4,7,3);}
     }
   });
 
-  // Feature descriptions
-  ctx.font='5px "Press Start 2P",monospace';
-  ctx.fillStyle='#E37400'; ctx.fillText('⚡ POWER SYSTEM: EACH CHIP COSTS WATTS',cx,360);
-  ctx.fillStyle=G.red; ctx.fillText('100W = THERMAL THROTTLE (GREY BAND!)',cx,376);
-  ctx.fillStyle='#FFD700'; ctx.fillText('3+ LINE CLEAR = GIGAWATT SURGE BONUS!',cx,392);
-  ctx.fillStyle=G.green; ctx.fillText('GKE NODES FORCE A CONTROL PLANE NEXT',cx,408);
-  ctx.fillStyle=G.dim; ctx.fillText('CLEAR CTRL PLANE ROWS = BONUS POINTS',cx,424);
+  // Feature Highlights
+  ctx.font='16px '+F_RETRO;
+  ctx.fillStyle='#FFD700'; ctx.fillText('⚡ POWER SYSTEM: EACH CHIP COSTS WATTS',cx,340);
+  ctx.fillStyle=G.red; ctx.fillText('⚠ 100W = THERMAL THROTTLE (GARBAGE ROWS)',cx,362);
+  ctx.fillStyle=G.yellow; ctx.fillText('⚡ 3+ LINE CLEARS TRIGGER GIGAWATT SURGE',cx,384);
+  ctx.fillStyle=G.green; ctx.fillText('☸ GKE NODES FORCE CONTROL PLANE DEPLOYMENT',cx,406);
+  ctx.fillStyle='#E8EAED'; ctx.fillText('🎯 CLEAR CONTROL PLANES FOR MASSIVE BONUS POINTS',cx,428);
 
-  // Blink
+  // Blinking Prompt
   if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.yellow; ctx.font='10px "Press Start 2P",monospace';
-    ctx.fillText('PRESS ENTER',cx,480);
-    ctx.fillText('TO DEPLOY',cx,500);
+    ctx.fillStyle=G.yellow; ctx.font='13px '+F_PIXEL;
+    ctx.fillText('PRESS ENTER TO DEPLOY',cx,485);
   }
+  
+  // Leaderboard Button Callout
+  ctx.fillStyle=G.blue; ctx.font='11px '+F_PIXEL;
+  ctx.fillText('[L] VIEW LEADERBOARD',cx,520);
+  
   // Controls
-  ctx.fillStyle=G.dim; ctx.font='5px "Press Start 2P",monospace';
-  ctx.fillText('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP',cx,550);
-  ctx.fillText('SPACE HARD DROP   C HOLD   P PAUSE',cx,566);
+  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
+  ctx.fillText('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD',cx,575);
+  
   // High score
-  if (highScore>0) { ctx.fillStyle=G.yellow; ctx.font='7px "Press Start 2P",monospace';
-    ctx.fillText('HIGH SCORE: '+highScore,cx,620); }
+  if (highScore>0) {
+    ctx.fillStyle=G.yellow; ctx.font='16px '+F_RETRO;
+    ctx.fillText('★ ALL-TIME HIGH SCORE: ' + highScore + ' ★',cx,640);
+  }
   ctx.textAlign='left';
 }
 
 function drawPause() {
-  ctx.fillStyle='rgba(32,33,36,0.88)'; ctx.fillRect(0,0,CW,CH);
+  ctx.fillStyle='rgba(20,21,24,0.92)'; ctx.fillRect(0,0,CW,CH);
   ctx.textAlign='center';
-  ctx.fillStyle=G.yellow; ctx.font='18px "Press Start 2P",monospace'; ctx.fillText('PAUSED',CW/2,300);
-  ctx.fillStyle=G.dim; ctx.font='8px "Press Start 2P",monospace';
-  ctx.fillText('PRESS P TO RESUME',CW/2,340);
-  ctx.fillText('PRESS Q TO QUIT',CW/2,360);
+  ctx.fillStyle=G.yellow; ctx.font='22px '+F_PIXEL; ctx.fillText('SYSTEM PAUSED',CW/2,280);
+  ctx.fillStyle=G.text; ctx.font='18px '+F_RETRO;
+  ctx.fillText('PRESS [P] TO RESUME OPERATION',CW/2,330);
+  ctx.fillText('PRESS [L] TO VIEW LEADERBOARD',CW/2,360);
+  ctx.fillText('PRESS [Q] TO RETURN TO TITLE',CW/2,390);
   ctx.textAlign='left';
 }
 
 function drawOver() {
-  ctx.fillStyle='rgba(32,33,36,0.92)'; ctx.fillRect(0,0,CW,CH);
+  ctx.fillStyle='rgba(20,21,24,0.94)'; ctx.fillRect(0,0,CW,CH);
   ctx.textAlign='center';
-  ctx.fillStyle=G.red; ctx.font='16px "Press Start 2P",monospace';
-  ctx.fillText('CLUSTER',CW/2,220); ctx.fillText('OVERLOADED!',CW/2,250);
-  ctx.fillStyle=G.dim; ctx.font='7px "Press Start 2P",monospace';
-  ctx.fillText('Resources Exhausted',CW/2,280);
-  ctx.fillStyle=G.text; ctx.font='10px "Press Start 2P",monospace';
-  ctx.fillText('SCORE: '+score,CW/2,320);
-  ctx.fillText('LINES: '+lines,CW/2,350);
-  ctx.fillText('LEVEL: '+level,CW/2,380);
-  ctx.fillStyle=G.green; ctx.font='6px "Press Start 2P",monospace';
-  ctx.fillText(REGIONS[Math.min(level-1,9)],CW/2,400);
-  // Power stats
-  ctx.fillStyle='#E37400'; ctx.font='7px "Press Start 2P",monospace';
-  ctx.fillText('PEAK POWER: '+power+'W',CW/2,430);
+  ctx.fillStyle=G.red; ctx.font='20px '+F_PIXEL;
+  ctx.fillText('CLUSTER OVERLOADED!',CW/2,180);
+  ctx.fillStyle=G.dim; ctx.font='18px '+F_RETRO;
+  ctx.fillText('Datacenter capacity exhausted.',CW/2,215);
+  
+  ctx.fillStyle='#FFFFFF'; ctx.font='13px '+F_PIXEL;
+  ctx.fillText('FINAL SCORE: '+score,CW/2,270);
+  ctx.fillStyle=G.text; ctx.font='18px '+F_RETRO;
+  ctx.fillText('LINES CLEARED: '+lines+'   |   LEVEL REACHED: '+level,CW/2,305);
+  ctx.fillStyle=G.green; ctx.font='18px '+F_RETRO;
+  ctx.fillText('MAX REGION: '+REGIONS[Math.min(level-1,9)],CW/2,335);
+  ctx.fillStyle='#E37400'; ctx.font='18px '+F_RETRO;
+  ctx.fillText('PEAK POWER LOAD: '+power+'W',CW/2,365);
 
   if (score>=highScore && score>0) {
-    ctx.fillStyle=G.yellow; ctx.font='9px "Press Start 2P",monospace';
+    ctx.fillStyle=G.yellow; ctx.font='12px '+F_PIXEL;
     const pulse = 0.7 + 0.3*Math.sin(frame*0.1);
-    ctx.globalAlpha=pulse; ctx.fillText('★ NEW HIGH SCORE ★',CW/2,465); ctx.globalAlpha=1;
+    ctx.globalAlpha=pulse; ctx.fillText('★ NEW HIGH SCORE RECORD ★',CW/2,420); ctx.globalAlpha=1;
   }
+  
   if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.green; ctx.font='9px "Press Start 2P",monospace';
-    ctx.fillText('PRESS ENTER TO',CW/2,510); ctx.fillText('REPROVISION',CW/2,535);
+    ctx.fillStyle=G.green; ctx.font='12px '+F_PIXEL;
+    ctx.fillText('PRESS ENTER TO SUBMIT SCORE',CW/2,480);
+  }
+  
+  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
+  ctx.fillText('[L] VIEW LEADERBOARD   |   [ESC] TITLE SCREEN',CW/2,530);
+  ctx.textAlign='left';
+}
+
+// ─── Name Entry Screen ───
+function drawNameEntry() {
+  ctx.fillStyle='rgba(18,20,24,0.96)'; ctx.fillRect(0,0,CW,CH);
+  ctx.textAlign='center';
+  
+  ctx.fillStyle=G.yellow; ctx.font='18px '+F_PIXEL;
+  ctx.fillText('HIGH SCORE ENTRY',CW/2,160);
+  
+  ctx.fillStyle=G.text; ctx.font='12px '+F_PIXEL;
+  ctx.fillText('SCORE: '+score,CW/2,205);
+  ctx.fillStyle=G.green; ctx.font='18px '+F_RETRO;
+  ctx.fillText('REGION: '+REGIONS[Math.min(level-1,9)],CW/2,235);
+  
+  ctx.fillStyle=G.dim; ctx.font='11px '+F_PIXEL;
+  ctx.fillText('ENTER YOUR INITIALS',CW/2,290);
+  
+  // 3 Character Slots
+  const startX = CW/2 - 90;
+  for (let i = 0; i < 3; i++) {
+    const slotX = startX + i * 65;
+    const slotY = 340;
+    const isSelected = (i === nameCursor);
+    
+    ctx.fillStyle = isSelected ? '#303134' : '#222328';
+    ctx.fillRect(slotX, slotY, 50, 60);
+    ctx.strokeStyle = isSelected ? G.yellow : '#5F6368';
+    ctx.lineWidth = isSelected ? 3 : 1;
+    ctx.strokeRect(slotX, slotY, 50, 60);
+    
+    if (isSelected) {
+      ctx.fillStyle = G.yellow; ctx.font = '16px '+F_PIXEL;
+      ctx.fillText('▲', slotX + 25, slotY - 12);
+      ctx.fillText('▼', slotX + 25, slotY + 82);
+    }
+    
+    ctx.fillStyle = isSelected ? G.yellow : '#FFFFFF';
+    ctx.font = '28px '+F_PIXEL;
+    ctx.fillText(nameChars[i], slotX + 25, slotY + 42);
+  }
+  
+  // Instructions
+  ctx.fillStyle=G.dim; ctx.font='18px '+F_RETRO;
+  ctx.fillText('← → : SELECT SLOT      ↑ ↓ : CHANGE LETTER',CW/2,480);
+  
+  if (Math.floor(frame/30)%2===0) {
+    ctx.fillStyle=G.green; ctx.font='12px '+F_PIXEL;
+    ctx.fillText('PRESS ENTER TO CONFIRM',CW/2,535);
+  }
+  
+  ctx.textAlign='left';
+}
+
+// ─── Leaderboard Screen ───
+function drawLeaderboard() {
+  ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
+  ctx.textAlign='center';
+  
+  // Header
+  ctx.fillStyle=G.yellow; ctx.font='16px '+F_PIXEL;
+  ctx.fillText('★ GLOBAL TOP 10 RANKINGS ★',CW/2,55);
+  
+  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
+  ctx.fillText(leaderboardStatus || 'ONLINE TELEMETRY',CW/2,82);
+  
+  // Table Background Card
+  const tx = 40, ty = 105, tw = CW - 80, th = 520;
+  ctx.fillStyle='#18191C'; ctx.fillRect(tx,ty,tw,th);
+  ctx.strokeStyle='#3C4043'; ctx.lineWidth=2; ctx.strokeRect(tx,ty,tw,th);
+  
+  // Table Headers
+  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL;
+  ctx.textAlign='left';
+  ctx.fillText('RANK', tx+20, ty+35);
+  ctx.fillText('NAME', tx+95, ty+35);
+  ctx.fillText('SCORE', tx+200, ty+35);
+  ctx.fillText('DATACENTER', tx+335, ty+35);
+  
+  // Divider
+  ctx.fillStyle='#3C4043'; ctx.fillRect(tx+15, ty+45, tw-30, 2);
+  
+  // Entries
+  if (leaderboardLoading) {
+    ctx.fillStyle=G.yellow; ctx.font='13px '+F_PIXEL; ctx.textAlign='center';
+    ctx.fillText('CONNECTING TO CLOUD...', CW/2, ty+240);
+  } else if (!leaderboardData || leaderboardData.length === 0) {
+    ctx.fillStyle=G.dim; ctx.font='13px '+F_PIXEL; ctx.textAlign='center';
+    ctx.fillText('NO SCORES RECORDED YET', CW/2, ty+240);
+  } else {
+    leaderboardData.slice(0, 10).forEach((entry, idx) => {
+      const rowY = ty + 78 + idx * 42;
+      const rank = idx + 1;
+      
+      let rankColor = G.text;
+      let badge = `${rank}`;
+      if (rank === 1) { rankColor = '#FBBC04'; badge = '1ST'; }
+      else if (rank === 2) { rankColor = '#7BAAF7'; badge = '2ND'; }
+      else if (rank === 3) { rankColor = '#34A853'; badge = '3RD'; }
+      
+      ctx.textAlign='left';
+      ctx.fillStyle = rankColor; ctx.font='10px '+F_PIXEL;
+      ctx.fillText(badge, tx+20, rowY);
+      
+      ctx.fillStyle = '#FFFFFF'; ctx.font='12px '+F_PIXEL;
+      ctx.fillText(entry.name || '???', tx+95, rowY);
+      
+      ctx.fillStyle = G.yellow; ctx.font='12px '+F_PIXEL;
+      ctx.fillText(String(entry.score || 0).padStart(7,'0'), tx+200, rowY);
+      
+      ctx.fillStyle = G.dim; ctx.font='18px '+F_RETRO;
+      ctx.fillText(entry.region || 'us-central1', tx+335, rowY+2);
+    });
+  }
+  
+  // Footer Return Prompt
+  ctx.textAlign='center';
+  if (Math.floor(frame/30)%2===0) {
+    ctx.fillStyle=G.yellow; ctx.font='10px '+F_PIXEL;
+    ctx.fillText('PRESS [ESC] OR [ENTER] TO RETURN', CW/2, 675);
   }
   ctx.textAlign='left';
 }
@@ -805,7 +1023,6 @@ function update() {
   if (shakeTimer>0) { shakeTimer--; shakeX=(Math.random()-0.5)*6; shakeY=(Math.random()-0.5)*6; }
   else { shakeX=0; shakeY=0; }
   if (flashTimer>0) flashTimer--;
-  // Power warning beep
   if (power > 80 && frame % 60 === 0) SFX.powerWarn();
   if (clearTimer>0) { clearTimer--; if(!clearTimer) finishClear(); return; }
   if (!piece) return;
@@ -831,18 +1048,104 @@ function draw() {
       drawHeader(); drawPowerBar(); drawBoard(); drawSidebar(); drawPause(); break;
     case ST.OVER:
       drawHeader(); drawBoard(); drawParticles(); drawSidebar(); drawOver(); break;
+    case ST.NAME_ENTRY:
+      drawNameEntry(); break;
+    case ST.LEADERBOARD:
+      drawLeaderboard(); break;
   }
 }
 
 // ─── Input ───
 document.addEventListener('keydown', e => {
-  if (state===ST.MENU) { if(e.key==='Enter'){startGame();e.preventDefault();} return; }
-  if (state===ST.OVER) { if(e.key==='Enter'){state=ST.MENU;e.preventDefault();} return; }
-  if (state===ST.PAUSE) {
-    if(e.key==='p'||e.key==='P') state=ST.PLAY;
-    if(e.key==='q'||e.key==='Q') state=ST.MENU;
+  if (state===ST.MENU) {
+    if(e.key==='Enter'){ startGame(); e.preventDefault(); }
+    else if(e.key==='l'||e.key==='L'){
+      prevState = ST.MENU;
+      state = ST.LEADERBOARD;
+      loadLeaderboard();
+      e.preventDefault();
+    }
     return;
   }
+  
+  if (state===ST.LEADERBOARD) {
+    if(e.key==='Escape' || e.key==='Enter' || e.key==='l' || e.key==='L'|| e.key===' '){
+      state = prevState || ST.MENU;
+      e.preventDefault();
+    }
+    return;
+  }
+  
+  if (state===ST.OVER) {
+    if(e.key==='Enter' || e.key===' '){
+      if (score > 0) {
+        state = ST.NAME_ENTRY;
+        nameCursor = 0;
+      } else {
+        state = ST.MENU;
+      }
+      e.preventDefault();
+    } else if(e.key==='l' || e.key==='L'){
+      prevState = ST.OVER;
+      state = ST.LEADERBOARD;
+      loadLeaderboard();
+      e.preventDefault();
+    } else if(e.key==='Escape'){
+      state = ST.MENU;
+      e.preventDefault();
+    }
+    return;
+  }
+  
+  if (state===ST.NAME_ENTRY) {
+    if (e.key==='ArrowLeft') {
+      nameCursor = (nameCursor + 2) % 3;
+      SFX.charSelect();
+      e.preventDefault();
+    } else if (e.key==='ArrowRight') {
+      nameCursor = (nameCursor + 1) % 3;
+      SFX.charSelect();
+      e.preventDefault();
+    } else if (e.key==='ArrowUp') {
+      let idx = LETTERS.indexOf(nameChars[nameCursor]);
+      idx = (idx + 1) % LETTERS.length;
+      nameChars[nameCursor] = LETTERS[idx];
+      SFX.charSelect();
+      e.preventDefault();
+    } else if (e.key==='ArrowDown') {
+      let idx = LETTERS.indexOf(nameChars[nameCursor]);
+      idx = (idx - 1 + LETTERS.length) % LETTERS.length;
+      nameChars[nameCursor] = LETTERS[idx];
+      SFX.charSelect();
+      e.preventDefault();
+    } else if (e.key.length === 1 && LETTERS.includes(e.key.toUpperCase())) {
+      nameChars[nameCursor] = e.key.toUpperCase();
+      nameCursor = Math.min(2, nameCursor + 1);
+      SFX.charSelect();
+      e.preventDefault();
+    } else if (e.key==='Enter' || e.key===' ') {
+      const finalName = nameChars.join('');
+      SFX.submit();
+      recordScore(finalName, score, REGIONS[Math.min(level-1,9)]);
+      prevState = ST.MENU;
+      state = ST.LEADERBOARD;
+      loadLeaderboard();
+      e.preventDefault();
+    }
+    return;
+  }
+  
+  if (state===ST.PAUSE) {
+    if(e.key==='p'||e.key==='P') state=ST.PLAY;
+    else if(e.key==='q'||e.key==='Q') state=ST.MENU;
+    else if(e.key==='l'||e.key==='L') {
+      prevState = ST.PAUSE;
+      state = ST.LEADERBOARD;
+      loadLeaderboard();
+    }
+    return;
+  }
+  
   if (state===ST.PLAY && clearTimer<=0) {
     switch(e.key) {
       case 'ArrowLeft': movePiece(-1,0); break;
@@ -852,11 +1155,20 @@ document.addEventListener('keydown', e => {
       case ' ': hardDrop(); break;
       case 'c': case 'C': doHold(); break;
       case 'p': case 'P': state=ST.PAUSE; break;
+      case 'l': case 'L':
+        prevState = ST.PLAY;
+        state = ST.LEADERBOARD;
+        loadLeaderboard();
+        break;
     }
   }
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
 });
+
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state===ST.PLAY) state=ST.PAUSE; });
+
+// Initial Leaderboard pre-load
+loadLeaderboard();
 
 // ─── Loop ───
 frame = 0;
