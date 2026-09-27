@@ -1,0 +1,4 @@
+# Normalise line endings: store LF in the repo and check out LF on every OS,
+# so Windows autocrlf does not rewrite the HTML/SVG on the next touch.
+* text=auto eol=lf
+*.png binary
