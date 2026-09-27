@@ -255,7 +255,10 @@ let leaderboardStatus = '';
 function getLocalLeaderboard() {
   try {
     const raw = localStorage.getItem('cc_leaderboard_v2');
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) return list.filter(e => e && typeof e.score === 'number');
+    }
   } catch(e) {}
   return [...DEFAULT_SCORES];
 }
@@ -266,47 +269,54 @@ function saveLocalLeaderboard(list) {
   } catch(e) {}
 }
 
+// Each load gets a sequence number so an older fetch that finishes late
+// cannot overwrite the result of a newer one.
+let loadSeq = 0;
 async function loadLeaderboard() {
+  const seq = ++loadSeq;
   leaderboardLoading = true;
   leaderboardStatus = 'FETCHING TELEMETRY...';
-  const localList = getLocalLeaderboard();
-  leaderboardData = localList;
+  leaderboardData = getLocalLeaderboard();
 
+  let status = 'LOCAL CLOUD ARCHIVE';
   if (LEADERBOARD_CONFIG.enabled && LEADERBOARD_CONFIG.dreamloPublicCode) {
     try {
       const url = `https://www.dreamlo.com/lb/${LEADERBOARD_CONFIG.dreamloPublicCode}/json/10`;
       const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.dreamlo && data.dreamlo.leaderboard) {
-          let entries = data.dreamlo.leaderboard.entry;
-          if (entries) {
-            if (!Array.isArray(entries)) entries = [entries];
-            leaderboardData = entries.map(e => ({
-              name: (e.name || '???').toUpperCase().slice(0, 3),
-              score: parseInt(e.score) || 0,
-              region: e.text || 'us-central1'
-            }));
-            leaderboardStatus = 'GLOBAL CLOUD SYNCED';
-            leaderboardLoading = false;
-            return;
-          }
-        }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (seq !== loadSeq) return; // a newer load has taken over
+      const lb = data && data.dreamlo && data.dreamlo.leaderboard;
+      let entries = lb ? lb.entry : null;
+      if (entries && !Array.isArray(entries)) entries = [entries];
+      if (entries) {
+        leaderboardData = entries.map(e => ({
+          name: (e.name || '???').toUpperCase().slice(0, 3),
+          score: parseInt(e.score) || 0,
+          region: e.text || 'us-central1'
+        }));
+        status = 'GLOBAL CLOUD SYNCED';
+      } else {
+        leaderboardData = [];
+        status = 'GLOBAL CLOUD SYNCED';
       }
     } catch(err) {
       console.warn('Dreamlo fetch error, fallback to local', err);
+      status = 'CLOUD OFFLINE - LOCAL ARCHIVE';
     }
   }
-
-  leaderboardStatus = 'LOCAL CLOUD ARCHIVE';
+  if (seq !== loadSeq) return;
+  leaderboardStatus = status;
   leaderboardLoading = false;
 }
 
+// Saves the score locally at once, then posts it to Dreamlo if configured.
+// Resolves when the cloud submit has finished (or failed), so callers can
+// reload the board afterwards and see the new entry.
 async function recordScore(name, scoreNum, regionStr) {
   const cleanName = (name || 'AAA').toUpperCase().slice(0, 3);
   const cleanRegion = regionStr || 'us-central1';
-  
-  // Update local
+
   let list = getLocalLeaderboard();
   list.push({ name: cleanName, score: scoreNum, region: cleanRegion });
   list.sort((a,b) => b.score - a.score);
@@ -314,11 +324,11 @@ async function recordScore(name, scoreNum, regionStr) {
   saveLocalLeaderboard(list);
   leaderboardData = list;
 
-  // Submit to Dreamlo if configured
   if (LEADERBOARD_CONFIG.enabled && LEADERBOARD_CONFIG.dreamloPrivateCode) {
     try {
       const url = `https://www.dreamlo.com/lb/${LEADERBOARD_CONFIG.dreamloPrivateCode}/add/${encodeURIComponent(cleanName)}/${scoreNum}/0/${encodeURIComponent(cleanRegion)}`;
-      await fetch(url);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
     } catch(e) {
       console.warn('Failed to post to Dreamlo', e);
     }
@@ -340,11 +350,9 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?_";
 let nameChars = ['A', 'A', 'A'];
 let nameCursor = 0;
 
-highScore = parseInt(localStorage.getItem('ccHS') || '0');
-const initialLocal = getLocalLeaderboard();
-if (initialLocal.length > 0 && initialLocal[0].score > highScore) {
-  highScore = initialLocal[0].score;
-}
+// The player's own best score. Deliberately not seeded from the leaderboard,
+// which starts with demo entries that are not the player's.
+highScore = parseInt(localStorage.getItem('ccHS') || '0') || 0;
 
 function resetState() {
   board = Array.from({length:ROWS}, ()=>new Array(COLS).fill(0));
@@ -835,7 +843,7 @@ function drawSidebar() {
     const lbl = { kind:'label', size:12, color:G.dim };
     fl.line('SCORE', lbl);
     fl.line(String(score).padStart(7, '0'), { size:14, color:'#FFFFFF' });
-    fl.line('TOP: ' + String(highScore).padStart(7, '0'), { kind:'body', size:18, color:G.yellow, gap:8 });
+    fl.line('BEST: ' + String(highScore).padStart(7, '0'), { kind:'body', size:18, color:G.yellow, gap:8 });
 
     fl.line('LEVEL', lbl);
     fl.box(lineH('pixel', 16), (x, y) => {
@@ -973,7 +981,7 @@ function drawTitle() {
     fl.line(blink() ? 'PRESS ENTER TO DEPLOY' : '', { size:14, color:G.yellow, gap:10 });
     fl.line('[L] LEADERBOARD    [O] OPTIONS', { size:12, color:G.blue, gap:26 });
     fl.line('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD', { kind:'body', size:18, color:G.dim, gap:24 });
-    fl.line(highScore > 0 ? '★ ALL-TIME HIGH SCORE: ' + highScore + ' ★' : '', { kind:'body', size:18, color:G.yellow });
+    fl.line(highScore > 0 ? '★ YOUR BEST: ' + highScore + ' ★' : '', { kind:'body', size:18, color:G.yellow });
   }, { x:cx, top:50, bottom:CH - 40, align:'center', max:CW - 40, center:true });
 }
 
@@ -1240,8 +1248,12 @@ document.addEventListener('keydown', e => {
     } else if (e.key==='Enter' || e.key===' ') {
       const finalName = nameChars.join('');
       SFX.submit();
-      recordScore(finalName, score, regionName());
-      openLeaderboard(ST.MENU);
+      // Show the board immediately, but only fetch it once the cloud submit
+      // has finished, otherwise the fetch can race the add and miss the
+      // new score.
+      prevState = ST.MENU; state = ST.LEADERBOARD;
+      leaderboardLoading = true; leaderboardStatus = 'UPLOADING SCORE...';
+      recordScore(finalName, score, regionName()).then(loadLeaderboard);
       e.preventDefault();
     }
     return;
