@@ -54,19 +54,69 @@ const LEADERBOARD_CONFIG = {
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const CW = 580, CH = 720;
+// ─── Player settings (persisted in localStorage, edited on the OPTIONS screen) ───
+const SETTINGS_KEY = 'cc_settings_v1';
+const DISPLAY_OPTS = [ { label:'FIT WINDOW', scale:0 }, { label:'1X', scale:1 },
+                       { label:'1.5X', scale:1.5 },     { label:'2X', scale:2 } ];
+const TEXT_OPTS    = [ { label:'NORMAL', scale:1 }, { label:'LARGE', scale:1.2 }, { label:'X-LARGE', scale:1.4 } ];
+const FONT_OPTS    = [ { label:'ARCADE' }, { label:'READABLE' } ];
+const SOUND_OPTS   = [ { label:'ON' }, { label:'OFF' } ];
+const OPTION_ROWS = [
+  { key:'display', name:'DISPLAY SIZE', opts:DISPLAY_OPTS, hint:'SIZE OF THE WHOLE GAME. FIXED SIZES SHRINK TO FIT THE WINDOW.' },
+  { key:'text',    name:'TEXT SIZE',    opts:TEXT_OPTS,    hint:'SCALES ALL TEXT. SHORTCUT: [ AND ] KEYS ON ANY SCREEN.' },
+  { key:'font',    name:'FONT STYLE',   opts:FONT_OPTS,    hint:'READABLE SWAPS THE PIXEL FONTS FOR CLEARER ONES.' },
+  { key:'sound',   name:'SOUND',        opts:SOUND_OPTS,   hint:'ARCADE SOUND EFFECTS.' },
+];
+const settings = { display:0, text:0, font:0, sound:0 };
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    for (const row of OPTION_ROWS) {
+      const v = s[row.key];
+      if (Number.isInteger(v) && v >= 0 && v < row.opts.length) settings[row.key] = v;
+    }
+  } catch(e) {}
+}
+function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch(e) {} }
+function cycleSetting(key, dir) {
+  const row = OPTION_ROWS.find(r => r.key === key);
+  settings[key] = (settings[key] + dir + row.opts.length) % row.opts.length;
+  saveSettings(); applyLayout();
+}
+function textScale() { return TEXT_OPTS[settings.text].scale; }
+loadSettings();
+
+// ─── Logical layout ───
+// All drawing code works in a logical coordinate space CW x CH. The board is
+// fixed; the sidebar (and therefore CW) widens with the text-size setting.
+const CH = 720;
+let CW = 580;
+const COLS = 10, ROWS = 20, CELL = 28;
+const BOARD_X = 20, BOARD_Y = 80;
+const BOARD_W = COLS * CELL, BOARD_H = ROWS * CELL;
+const SIDEBAR_X = BOARD_X + BOARD_W + 24;
+const SIDEBAR_BASE_W = 236;
+let SB_W = SIDEBAR_BASE_W;
+function applyLayout() {
+  SB_W = Math.round(SIDEBAR_BASE_W * textScale());
+  CW = SIDEBAR_X + SB_W + 20;
+}
+applyLayout();
 
 // ─── Display scaling ───
-// All drawing code works in a fixed 580x720 logical space. fitCanvas() scales
-// that space to fill the window and renders at native device resolution, so
-// text stays sharp on HiDPI displays and under browser zoom.
+// fitCanvas() scales the logical space to the window (or to the chosen fixed
+// display size, clamped to the window) and renders at native device
+// resolution, so text stays sharp on HiDPI displays and under browser zoom.
 const SCREEN_MARGIN = 48; // room for the bezel border + glow
-let fitW = 0, fitH = 0, fitDpr = 0;
+let fitKey = '';
 function fitCanvas() {
   const w = window.innerWidth, h = window.innerHeight, dpr = window.devicePixelRatio || 1;
-  if (w === fitW && h === fitH && dpr === fitDpr) return;
-  fitW = w; fitH = h; fitDpr = dpr;
-  const scale = Math.max(0.3, Math.min((w - SCREEN_MARGIN) / CW, (h - SCREEN_MARGIN) / CH));
+  const want = DISPLAY_OPTS[settings.display].scale;
+  const key = [w, h, dpr, CW, want].join(',');
+  if (key === fitKey) return;
+  fitKey = key;
+  const fit = Math.min((w - SCREEN_MARGIN) / CW, (h - SCREEN_MARGIN) / CH);
+  const scale = Math.max(0.3, want ? Math.min(want, fit) : fit);
   canvas.style.width  = Math.round(CW * scale) + 'px';
   canvas.style.height = Math.round(CH * scale) + 'px';
   canvas.width  = Math.round(CW * scale * dpr);
@@ -74,18 +124,35 @@ function fitCanvas() {
   // Resizing resets context state, so the transform is applied after.
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
 }
-// Checked every frame (cheap: three property reads) rather than via the resize
+// Checked every frame (cheap: a few property reads) rather than via the resize
 // event, which some embedded/emulated viewports do not dispatch reliably.
 fitCanvas();
 
-const COLS = 10, ROWS = 20, CELL = 28;
-const BOARD_X = 20, BOARD_Y = 80;
-const BOARD_W = COLS * CELL, BOARD_H = ROWS * CELL;
-const SIDEBAR_X = BOARD_X + BOARD_W + 24;
-
+// ─── Fonts ───
+// Every piece of text is one of three kinds. Each font style maps a kind to a
+// family, a size multiplier (k, to equalise apparent size between families)
+// and a line-height factor. Base sizes in the drawing code are the minimums:
+// 12px for pixel/label text and 18px for body text.
 const F_PIXEL = '"Press Start 2P", monospace';
 const F_RETRO = '"VT323", monospace';
-const F_SILK = '"Silkscreen", monospace';
+const F_SILK  = '"Silkscreen", monospace';
+const F_MONO  = 'Consolas, Menlo, "DejaVu Sans Mono", monospace';
+const FONT_MODES = [
+  { // ARCADE
+    pixel: { family:F_PIXEL, weight:'',    k:1,    lh:1.6  },
+    label: { family:F_SILK,  weight:'700', k:1,    lh:1.5  },
+    body:  { family:F_RETRO, weight:'',    k:1,    lh:1.1  },
+  },
+  { // READABLE
+    pixel: { family:F_SILK,  weight:'700', k:1.05, lh:1.6  },
+    label: { family:F_SILK,  weight:'700', k:1,    lh:1.5  },
+    body:  { family:F_MONO,  weight:'',    k:0.8,  lh:1.35 },
+  },
+];
+function fontSpec(kind) { return FONT_MODES[settings.font][kind]; }
+function fontPx(kind, size) { return Math.round(size * fontSpec(kind).k * textScale()); }
+function fontStr(kind, px) { const f = fontSpec(kind); return (f.weight ? f.weight + ' ' : '') + px + 'px ' + f.family; }
+function lineH(kind, size) { return Math.round(fontPx(kind, size) * fontSpec(kind).lh); }
 
 const G = { blue:'#4285F4', red:'#EA4335', yellow:'#FBBC04', green:'#34A853',
             bg:'#202124', surface:'#303134', text:'#E8EAED', dim:'#9AA0A6', border:'#5F6368' };
@@ -136,7 +203,7 @@ const REGIONS = ['us-central1','us-east1','europe-west1','asia-east1','us-west1'
 let audioCtx;
 function initAudio() { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
 function beep(freq, dur, type='square', vol=0.07) {
-  if (!audioCtx) return;
+  if (!audioCtx || settings.sound === 1) return;
   try {
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type = type; o.frequency.value = freq; g.gain.value = vol;
@@ -261,13 +328,13 @@ async function recordScore(name, scoreNum, regionStr) {
 }
 
 // ─── State ───
-const ST = { MENU:0, PLAY:1, PAUSE:2, OVER:3, LEADERBOARD:4, NAME_ENTRY:5 };
+const ST = { MENU:0, PLAY:1, PAUSE:2, OVER:3, LEADERBOARD:4, NAME_ENTRY:5, OPTIONS:6 };
 let state = ST.MENU;
 let prevState = ST.MENU;
 let board, piece, nextType, holdType, canHold, bag, score, highScore, lines, level;
 let dropTimer, lockTimer, clearRows, clearTimer, forceCtrl;
 let particles, msg, msgTimer, msgColor, frame;
-let power, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
+let power, peakPower, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
 let gigawattPending, ctrlPlaneRows;
 let currentDC = 0;
 
@@ -287,7 +354,7 @@ function resetState() {
   score=0; lines=0; level=1; holdType=-1; canHold=true; forceCtrl=false;
   particles=[]; msg=''; msgTimer=0; dropTimer=0; lockTimer=0;
   clearRows=[]; clearTimer=0; bag=[]; power=0;
-  shakeTimer=0; shakeX=0; shakeY=0; flashTimer=0; flashColor='#FFF';
+  peakPower=0; shakeTimer=0; shakeX=0; shakeY=0; flashTimer=0; flashColor='#FFF';
   gigawattPending=false; ctrlPlaneRows=0;
   const dc = pickRegion();
   generateInheritedWorkload(dc.cond, true);
@@ -327,6 +394,7 @@ function getGhostY() { let gy=piece.y; while(isValid(piece.shape,piece.x,gy+1)) 
 // ─── Power system ───
 function addPower(amount) {
   power = Math.min(MAX_POWER, power + amount);
+  peakPower = Math.max(peakPower, power);
   if (power >= MAX_POWER) thermalThrottle();
 }
 function reducePower(amount) { power = Math.max(0, power - amount); }
@@ -655,13 +723,77 @@ function drawPiece() {
       drawCell(BOARD_X+(piece.x+x)*CELL, BOARD_Y+(piece.y+y)*CELL, piece.color, piece.type+1);
 }
 
-function drawPreview(type, x, y, label) {
-  ctx.fillStyle=G.dim; ctx.font='10px '+F_PIXEL; ctx.textAlign='left';
-  ctx.fillText(label, x, y);
-  if (type<0) { ctx.fillStyle='#4A4A5A'; ctx.font='14px '+F_RETRO; ctx.fillText('[ EMPTY ]',x+12,y+38); return; }
-  if (type===7) { ctx.fillStyle='#E37400'; ctx.font='13px '+F_RETRO; ctx.fillText('! CRITICAL OVERHEAD',x,y+16); }
-  const d=PIECES[type], s=d.shape, bw=s[0].length*14, bh=s.length*14;
-  const ox=x+(84-bw)/2, oy=y+14+(44-bh)/2;
+// ─── Text rendering ───
+// text() is the only place fillText is called. It applies the font style and
+// text-size settings, and if `max` is given it shrinks the font (to 75%) and
+// then condenses the glyphs so the string always fits.
+function text(str, x, y, o = {}) {
+  const kind = o.kind || 'pixel', size = o.size || 12;
+  let px = fontPx(kind, size);
+  ctx.font = fontStr(kind, px);
+  let w = o.max ? ctx.measureText(str).width : 0;
+  const minPx = Math.ceil(px * 0.75);
+  while (o.max && w > o.max && px > minPx) { px--; ctx.font = fontStr(kind, px); w = ctx.measureText(str).width; }
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = o.baseline || 'top';
+  const paint = (color, d) => {
+    ctx.fillStyle = color;
+    if (o.max && w > o.max) ctx.fillText(str, x + d, y + d, o.max); else ctx.fillText(str, x + d, y + d);
+  };
+  if (o.shadow) paint('#000', o.shadow);
+  paint(o.color || G.text, 0);
+}
+
+// ─── Flow layout ───
+// Screens are built as a vertical flow of lines, gaps and custom boxes so
+// their spacing follows the current font sizes instead of hand-placed y
+// values. renderFlow() measures the flow first, drops optional sections
+// (highest level first) if it does not fit, compresses gaps if it still does
+// not fit, then draws it.
+class Flow {
+  constructor(x, y, o = {}) {
+    this.x = x; this.y = y; this.top = y;
+    this.align = o.align || 'left'; this.max = o.max || 0;
+    this.dry = !!o.dry; this.gapScale = o.gapScale == null ? 1 : o.gapScale;
+    this.level = o.level == null ? 99 : o.level;
+    this.gaps = 0; this.used = 0;
+  }
+  get h() { return this.y - this.top; }
+  line(str, o = {}) {
+    const kind = o.kind || 'pixel', size = o.size || 12;
+    if (!this.dry) text(str, this.x + (o.dx || 0), this.y, Object.assign({ align:this.align, max:this.max }, o));
+    this.y += lineH(kind, size);
+    return this.gap(o.gap || 0);
+  }
+  gap(n) { this.y += Math.round(n * this.gapScale); this.gaps += n; return this; }
+  box(h, fn) { if (!this.dry) fn(this.x, this.y, h); this.y += h; return this; }
+  optional(level, fn) { if (level <= this.level) { this.used = Math.max(this.used, level); fn(this); } return this; }
+}
+function renderFlow(build, o) {
+  const avail = o.bottom - o.top;
+  let level = 99, fl;
+  for (;;) {
+    fl = new Flow(o.x, o.top, { align:o.align, max:o.max, dry:true, level });
+    build(fl);
+    if (fl.h <= avail || fl.used === 0) break;
+    level = fl.used - 1;
+  }
+  let gapScale = 1, h = fl.h;
+  if (h > avail && fl.gaps > 0) {
+    gapScale = Math.max(0.15, Math.min(1, (avail - (h - fl.gaps)) / fl.gaps));
+    h = h - fl.gaps + Math.round(fl.gaps * gapScale);
+  }
+  const y0 = o.center ? o.top + Math.max(0, Math.round((avail - h) / 2)) : o.top;
+  const out = new Flow(o.x, y0, { align:o.align, max:o.max, level, gapScale });
+  build(out);
+  return out; // out.used = highest optional level that was drawn
+}
+const blink = () => Math.floor(frame / 30) % 2 === 0;
+
+// ─── Sidebar ───
+function drawPreviewShape(type, x, y, w, h) {
+  const d = PIECES[type], s = d.shape, bw = s[0].length * 14, bh = s.length * 14;
+  const ox = x + Math.floor((w - bw) / 2), oy = y + Math.floor((h - bh) / 2);
   for (let r=0;r<s.length;r++) for (let c=0;c<s[r].length;c++) if(s[r][c]) {
     const cpx=ox+c*14, cpy=oy+r*14;
     ctx.fillStyle=d.color; ctx.fillRect(cpx,cpy,13,13);
@@ -674,90 +806,98 @@ function drawPreview(type, x, y, label) {
     else if (type===6) { ctx.fillStyle=lighten(d.color,25); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+3,2,1); for(let i=0;i<3;i++) ctx.fillRect(cpx+3+i*3,cpy+9,2,1); }
     else if (type===7) { ctx.fillStyle=darken(d.color,15); ctx.fillRect(cpx+3,cpy+5,7,1); ctx.fillRect(cpx+5,cpy+3,1,7); }
   }
-  ctx.fillStyle=d.color; ctx.font='14px '+F_RETRO; ctx.fillText(d.name,x,oy+bh+14);
+}
+function previewSection(fl, type, label) {
+  fl.line(label, { kind:'label', size:12, color:G.dim });
+  fl.box(46, (x, y, h) => {
+    if (type < 0) { text('[ EMPTY ]', x + 42, y + h / 2, { kind:'body', size:18, color:'#4A4A5A', align:'center', baseline:'middle' }); return; }
+    drawPreviewShape(type, x, y, 84, h);
+  });
+  const d = type >= 0 ? PIECES[type] : null;
+  fl.line(!d ? '' : type === 7 ? d.name + '  ! OVERHEAD' : d.name, { kind:'body', size:18, color: d ? d.color : G.dim, gap:6 });
 }
 
 function drawPowerBar() {
-  const bx=BOARD_X, by=BOARD_Y-20, bw=BOARD_W, bh=12;
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.textAlign='left';
-  ctx.fillText('POWER RACK', bx, by-4);
-  ctx.fillStyle=power>80?G.red:power>55?G.yellow:G.green; ctx.font='10px '+F_PIXEL; ctx.textAlign='right';
-  ctx.fillText(power+'W / 100W', bx+bw, by-4);
-  ctx.textAlign='left';
-  ctx.fillStyle='#303134'; ctx.fillRect(bx,by,bw,bh);
+  const bh = Math.max(16, fontPx('label', 12) + 6);
+  const bx = BOARD_X, by = BOARD_Y - bh - 6, bw = BOARD_W;
   const pct = power / MAX_POWER;
-  let barColor = pct > 0.8 ? G.red : pct > 0.55 ? G.yellow : G.green;
-  ctx.fillStyle = barColor;
-  ctx.fillRect(bx, by, bw * pct, bh);
-  ctx.fillStyle = '#202124';
-  for (let i=1;i<10;i++) ctx.fillRect(bx+i*(bw/10), by, 1, bh);
-  ctx.strokeStyle = pct > 0.8 ? G.red : '#5F6368';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(bx, by, bw, bh);
-  ctx.fillStyle = 'rgba(234,67,53,0.3)';
-  ctx.fillRect(bx + bw*0.8, by, bw*0.2, bh);
-  if (power > 70 && Math.floor(frame/10)%2===0) {
-    ctx.fillStyle = '#FFD700';
-    ctx.font = '10px '+F_PIXEL;
-    ctx.textAlign = 'right';
-    ctx.fillText('⚡', bx+bw+16, by+10);
-    ctx.textAlign = 'left';
-  }
+  const col = pct > 0.8 ? G.red : pct > 0.55 ? G.yellow : G.green;
+  ctx.fillStyle = '#303134'; ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = col; ctx.fillRect(bx, by, bw * pct, bh);
+  ctx.fillStyle = 'rgba(234,67,53,0.3)'; ctx.fillRect(bx + bw * 0.8, by, bw * 0.2, bh);
+  ctx.fillStyle = '#202124'; for (let i = 1; i < 10; i++) ctx.fillRect(bx + i * (bw / 10), by, 1, bh);
+  ctx.strokeStyle = pct > 0.8 ? G.red : '#5F6368'; ctx.lineWidth = 1; ctx.strokeRect(bx, by, bw, bh);
+  const ty = by + bh / 2 + 1;
+  text('POWER RACK', bx + 6, ty, { kind:'label', size:12, color:'#FFF', baseline:'middle', shadow:1, max:bw * 0.4 });
+  text(power + 'W / ' + MAX_POWER + 'W', bx + bw - 6, ty, { kind:'label', size:12, color:'#FFF', align:'right', baseline:'middle', shadow:1, max:bw * 0.48 });
+  if (power > 70 && Math.floor(frame / 10) % 2 === 0)
+    text('⚡', bx + bw + 18, ty, { kind:'label', size:12, color:'#FFD700', align:'right', baseline:'middle' });
 }
 
 function drawSidebar() {
-  const sx=SIDEBAR_X;
-  ctx.textAlign='left';
-  
-  // Score block
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('SCORE',sx,92);
-  ctx.fillStyle='#FFFFFF'; ctx.font='14px '+F_PIXEL; ctx.fillText(String(score).padStart(7,'0'),sx,114);
-  ctx.fillStyle=G.yellow; ctx.font='14px '+F_RETRO; ctx.fillText('TOP: '+String(highScore).padStart(7,'0'),sx,132);
-  
-  // Level & Region
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('LEVEL',sx,156);
-  ctx.fillStyle=G.blue; ctx.font='16px '+F_PIXEL; ctx.fillText(String(level),sx,178);
-  ctx.fillStyle=G.green; ctx.font='15px '+F_RETRO; ctx.fillText(REGIONS[Math.min(level-1,9)],sx+36,178);
-  
-  // Lines
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('LINES CLEARED',sx,202);
-  ctx.fillStyle=G.text; ctx.font='14px '+F_PIXEL; ctx.fillText(String(lines),sx,224);
-  
-  // Previews
-  drawPreview(nextType, sx, 252, 'NEXT CHIP');
-  drawPreview(holdType, sx, 344, 'HOLD [C]');
-  
-  // Active piece specs
-  if (piece) {
-    const d=PIECES[piece.type];
-    ctx.fillStyle=d.color; ctx.font='10px '+F_PIXEL; ctx.fillText(d.name,sx,442);
-    ctx.fillStyle=G.text; ctx.font='15px '+F_RETRO; ctx.fillText(d.desc,sx,460);
-    ctx.fillStyle=d.pw>=10?G.red:d.pw>=7?G.yellow:G.green;
-    ctx.font='15px '+F_RETRO; ctx.fillText('DRAW: +'+d.pw+'W PER PIECE',sx,478);
+  const barW = SB_W - 20;
+  const fl = renderFlow(fl => {
+    const lbl = { kind:'label', size:12, color:G.dim };
+    fl.line('SCORE', lbl);
+    fl.line(String(score).padStart(7, '0'), { size:14, color:'#FFFFFF' });
+    fl.line('TOP: ' + String(highScore).padStart(7, '0'), { kind:'body', size:18, color:G.yellow, gap:8 });
+
+    fl.line('LEVEL', lbl);
+    fl.box(lineH('pixel', 16), (x, y) => {
+      text(String(level), x, y, { size:16, color:G.blue });
+      const w = ctx.measureText(String(level) + '  ').width;
+      const dy = Math.max(0, Math.round((fontPx('pixel', 16) - fontPx('body', 18)) / 2));
+      text(REGIONS[Math.min(level - 1, 9)], x + w, y + dy, { kind:'body', size:18, color:G.green, max:barW - w });
+    });
+    fl.gap(8);
+
+    fl.line('LINES CLEARED', lbl);
+    fl.line(String(lines), { size:14, color:G.text, gap:8 });
+
+    previewSection(fl, nextType, 'NEXT CHIP');
+    previewSection(fl, holdType, 'HOLD [C]');
+
+    const d = piece ? PIECES[piece.type] : null;
+    fl.line(d ? d.name : '', { size:12, color: d ? d.color : G.dim });
+    fl.line(d ? d.desc : '', { kind:'body', size:18, color:G.text });
+    fl.line(d ? 'DRAW: +' + d.pw + 'W PER PIECE' : '', { kind:'body', size:18, color: !d ? G.dim : d.pw >= 10 ? G.red : d.pw >= 7 ? G.yellow : G.green, gap:6 });
+
+    fl.box(3, (x, y) => { GCOLORS.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(x + i * (barW / 4), y, barW / 4, 3); }); });
+    fl.gap(10);
+
+    fl.optional(1, f => {
+      const o = { kind:'body', size:18, color:G.dim };
+      f.line('←→ MOVE    ↑ ROTATE', o);
+      f.line('↓ SOFT     SPC DROP', o);
+      f.line('C HOLD     P PAUSE', o);
+      f.line('L RANKS    O OPTIONS', o);
+      f.gap(10);
+    });
+
+    const spd = Math.max(3, 48 - (level - 1) * 4), pct = Math.round((1 - spd / 48) * 100);
+    fl.line('SPEED CLOCK', lbl);
+    fl.box(8, (x, y) => {
+      ctx.fillStyle = '#303134'; ctx.fillRect(x, y, barW, 8);
+      ctx.fillStyle = pct > 80 ? G.red : pct > 50 ? G.yellow : G.green; ctx.fillRect(x, y, barW * pct / 100, 8);
+    });
+
+    fl.optional(2, f => {
+      f.gap(12);
+      const o = { kind:'body', size:18, color:G.dim };
+      f.line('• CLEARS = COOLING WATTS', o);
+      f.line('• 100W = THERMAL THROTTLE', o);
+      f.line('• 3+ LINES = GIGAWATT SURGE', o);
+    });
+  }, { x:SIDEBAR_X, top:BOARD_Y - 2, bottom:CH - 12, max:barW });
+
+  // If large text pushed the controls list out of the sidebar, show a compact
+  // version in the strip under the board instead.
+  if (fl.used < 1) {
+    const o = { kind:'body', size:18, color:G.dim, align:'center', max:BOARD_W };
+    const y = BOARD_Y + BOARD_H + 8, lh = lineH('body', 18);
+    text('←→ MOVE  ↑ ROTATE  ↓ SOFT  SPC DROP', BOARD_X + BOARD_W / 2, y, o);
+    text('C HOLD  P PAUSE  L RANKS  O OPTIONS', BOARD_X + BOARD_W / 2, y + lh, o);
   }
-  
-  // Google bar
-  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(sx+i*52,492,52,3); });
-  
-  // Controls reference
-  ctx.fillStyle=G.dim; ctx.font='15px '+F_RETRO;
-  ctx.fillText('←→ MOVE    ↑ ROTATE',sx,516);
-  ctx.fillText('↓ SOFT     SPC DROP',sx,534);
-  ctx.fillText('C HOLD     P PAUSE',sx,552);
-  ctx.fillText('L LEADERBOARD',sx,570);
-  
-  // Speed Gauge
-  const spd = Math.max(3,48-(level-1)*4);
-  const pct = Math.round((1-spd/48)*100);
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL; ctx.fillText('SPEED CLOCK',sx,594);
-  ctx.fillStyle='#303134'; ctx.fillRect(sx,602,208,8);
-  ctx.fillStyle=pct>80?G.red:pct>50?G.yellow:G.green; ctx.fillRect(sx,602,208*pct/100,8);
-  
-  // Power Tips
-  ctx.fillStyle=G.dim; ctx.font='14px '+F_RETRO;
-  ctx.fillText('• CLEARS = COOLING WATTS',sx,628);
-  ctx.fillText('• 100W = THERMAL THROTTLE',sx,644);
-  ctx.fillText('• 3+ LINES = GIGAWATT SURGE',sx,660);
 }
 
 function drawParticles() {
@@ -766,26 +906,20 @@ function drawParticles() {
 }
 
 function drawMsg() {
-  if (msgTimer<=0) return;
+  if (msgTimer <= 0) return;
   ctx.save();
-  const alpha = Math.min(1, msgTimer/20);
-  ctx.globalAlpha=alpha;
-  ctx.fillStyle='rgba(10,12,16,0.85)';
-  ctx.fillRect(BOARD_X, BOARD_Y+BOARD_H/2-26, BOARD_W, 48);
-  ctx.strokeStyle=msgColor; ctx.lineWidth=2;
-  ctx.strokeRect(BOARD_X, BOARD_Y+BOARD_H/2-26, BOARD_W, 48);
-  ctx.fillStyle=msgColor; ctx.font='12px '+F_PIXEL; ctx.textAlign='center';
-  ctx.fillText(msg, BOARD_X+BOARD_W/2, BOARD_Y+BOARD_H/2+4);
-  ctx.restore(); ctx.textAlign='left';
+  ctx.globalAlpha = Math.min(1, msgTimer / 20);
+  const h = Math.max(48, fontPx('pixel', 12) * 3), cy = BOARD_Y + BOARD_H / 2;
+  ctx.fillStyle = 'rgba(10,12,16,0.85)'; ctx.fillRect(BOARD_X, cy - h / 2, BOARD_W, h);
+  ctx.strokeStyle = msgColor; ctx.lineWidth = 2; ctx.strokeRect(BOARD_X, cy - h / 2, BOARD_W, h);
+  text(msg, BOARD_X + BOARD_W / 2, cy, { size:12, color:msgColor, align:'center', baseline:'middle', max:BOARD_W - 16 });
+  ctx.restore();
 }
 
 function drawHeader() {
-  ctx.font='13px '+F_PIXEL; ctx.textAlign='left';
-  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',BOARD_X,28);
-  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',BOARD_X+12,48);
-  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO; ctx.textAlign='right';
-  ctx.fillText('[L] LEADERBOARD  [P] PAUSE',CW-24,38);
-  ctx.textAlign='left';
+  text('CAPACITY', BOARD_X, 14, { size:14, color:G.blue });
+  const w = ctx.measureText('CAPACITY ').width;
+  text('CRUNCHING', BOARD_X + w, 14, { size:14, color:G.red });
 }
 
 function drawFlash() {
@@ -808,234 +942,186 @@ function drawTitle() {
     ctx.fillStyle=darken(c,40); ctx.fillRect(bx+sz-2,by,2,sz); ctx.fillRect(bx,by+sz-2,sz,2);
   }
   ctx.globalAlpha=1;
-  const cx=CW/2;
-  ctx.textAlign='center';
-  
-  // Drop Shadow
-  ctx.fillStyle='#000'; ctx.font='26px '+F_PIXEL;
-  ctx.fillText('CAPACITY',cx+3,133); ctx.fillText('CRUNCHING',cx+3,173);
-  
-  // Title
-  ctx.fillStyle=G.blue; ctx.fillText('CAPACITY',cx,130);
-  ctx.fillStyle=G.red; ctx.fillText('CRUNCHING',cx,170);
-  
-  // Subtitle
-  ctx.fillStyle=G.text; ctx.font='20px '+F_RETRO;
-  ctx.fillText('STACK • OPTIMIZE • DEPLOY • SCALE',cx,208);
-  
-  // Google bar
-  [G.blue,G.red,G.yellow,G.green].forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(cx-120+i*60,222,60,4);});
-  
-  // Piece showcase
-  const showcase = [
-    [0,'VM f1',G.blue],[3,'GPU A3',G.yellow],[4,'TPU v5p','#7BAAF7'],[5,'GKE Node',G.green]
-  ];
-  showcase.forEach(([t,label,c],i) => {
-    const ox=cx-180+i*95, oy=255;
-    ctx.fillStyle=c; ctx.font='15px '+F_RETRO; ctx.fillText(label,ox+18,oy);
-    const d=PIECES[t], s=d.shape;
-    for(let r=0;r<s.length;r++) for(let cc=0;cc<s[r].length;cc++) if(s[r][cc]) {
-      const px=ox+cc*12, py=oy+8+r*12;
-      ctx.fillStyle=d.color; ctx.fillRect(px,py,11,11);
-      ctx.fillStyle=lighten(d.color,35); ctx.fillRect(px,py,11,1); ctx.fillRect(px,py,1,11);
-      ctx.fillStyle=darken(d.color,35); ctx.fillRect(px,py+10,11,1); ctx.fillRect(px+10,py,1,11);
-    }
-  });
+  const cx = CW / 2;
+  renderFlow(fl => {
+    fl.line('CAPACITY',  { size:26, color:G.blue, shadow:3 });
+    fl.line('CRUNCHING', { size:26, color:G.red,  shadow:3, gap:6 });
+    fl.line('STACK • OPTIMIZE • DEPLOY • SCALE', { kind:'body', size:20, color:G.text, gap:4 });
+    fl.box(4, (x, y) => { GCOLORS.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(x - 120 + i * 60, y, 60, 4); }); });
+    fl.gap(22);
 
-  // Feature Highlights
-  ctx.font='16px '+F_RETRO;
-  ctx.fillStyle='#FFD700'; ctx.fillText('⚡ POWER SYSTEM: EACH CHIP COSTS WATTS',cx,340);
-  ctx.fillStyle=G.red; ctx.fillText('⚠ 100W = THERMAL THROTTLE (GARBAGE ROWS)',cx,362);
-  ctx.fillStyle=G.yellow; ctx.fillText('⚡ 3+ LINE CLEARS TRIGGER GIGAWATT SURGE',cx,384);
-  ctx.fillStyle=G.green; ctx.fillText('☸ GKE NODES FORCE CONTROL PLANE DEPLOYMENT',cx,406);
-  ctx.fillStyle='#E8EAED'; ctx.fillText('🎯 CLEAR CONTROL PLANES FOR MASSIVE BONUS POINTS',cx,428);
+    const showcase = [[0,'VM f1',G.blue],[3,'GPU A3',G.yellow],[4,'TPU v5p','#7BAAF7'],[5,'GKE Node',G.green]];
+    const lh = lineH('body', 18);
+    fl.box(lh + 4 + 36, (x, y) => {
+      showcase.forEach(([t, label, c], i) => {
+        const ox = x - 180 + i * 95;
+        text(label, ox + 18, y, { kind:'body', size:18, color:c, align:'center', max:90 });
+        const s = PIECES[t].shape, col = PIECES[t].color;
+        for (let r=0;r<s.length;r++) for (let cc=0;cc<s[r].length;cc++) if (s[r][cc]) {
+          const px=ox+cc*12, py=y+lh+4+r*12;
+          ctx.fillStyle=col; ctx.fillRect(px,py,11,11);
+          ctx.fillStyle=lighten(col,35); ctx.fillRect(px,py,11,1); ctx.fillRect(px,py,1,11);
+          ctx.fillStyle=darken(col,35); ctx.fillRect(px,py+10,11,1); ctx.fillRect(px+10,py,1,11);
+        }
+      });
+    });
+    fl.gap(18);
 
-  // Blinking Prompt
-  if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.yellow; ctx.font='13px '+F_PIXEL;
-    ctx.fillText('PRESS ENTER TO DEPLOY',cx,485);
-  }
-  
-  // Leaderboard Button Callout
-  ctx.fillStyle=G.blue; ctx.font='11px '+F_PIXEL;
-  ctx.fillText('[L] VIEW LEADERBOARD',cx,520);
-  
-  // Controls
-  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
-  ctx.fillText('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD',cx,575);
-  
-  // High score
-  if (highScore>0) {
-    ctx.fillStyle=G.yellow; ctx.font='16px '+F_RETRO;
-    ctx.fillText('★ ALL-TIME HIGH SCORE: ' + highScore + ' ★',cx,640);
-  }
-  ctx.textAlign='left';
+    const feat = { kind:'body', size:18, gap:2 };
+    fl.line('⚡ POWER SYSTEM: EACH CHIP COSTS WATTS',          Object.assign({ color:'#FFD700' }, feat));
+    fl.line('⚠ 100W = THERMAL THROTTLE (GARBAGE ROWS)',        Object.assign({ color:G.red }, feat));
+    fl.line('⚡ 3+ LINE CLEARS TRIGGER GIGAWATT SURGE',         Object.assign({ color:G.yellow }, feat));
+    fl.line('☸ GKE NODES FORCE CONTROL PLANE DEPLOYMENT',      Object.assign({ color:G.green }, feat));
+    fl.line('🎯 CLEAR CONTROL PLANES FOR MASSIVE BONUS POINTS', Object.assign({ color:'#E8EAED' }, feat));
+    fl.gap(24);
+
+    fl.line(blink() ? 'PRESS ENTER TO DEPLOY' : '', { size:14, color:G.yellow, gap:10 });
+    fl.line('[L] LEADERBOARD    [O] OPTIONS', { size:12, color:G.blue, gap:26 });
+    fl.line('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD', { kind:'body', size:18, color:G.dim, gap:24 });
+    fl.line(highScore > 0 ? '★ ALL-TIME HIGH SCORE: ' + highScore + ' ★' : '', { kind:'body', size:18, color:G.yellow });
+  }, { x:cx, top:50, bottom:CH - 40, align:'center', max:CW - 40, center:true });
 }
 
 function drawPause() {
   ctx.fillStyle='rgba(20,21,24,0.92)'; ctx.fillRect(0,0,CW,CH);
-  ctx.textAlign='center';
-  ctx.fillStyle=G.yellow; ctx.font='22px '+F_PIXEL; ctx.fillText('SYSTEM PAUSED',CW/2,280);
-  ctx.fillStyle=G.text; ctx.font='18px '+F_RETRO;
-  ctx.fillText('PRESS [P] TO RESUME OPERATION',CW/2,330);
-  ctx.fillText('PRESS [L] TO VIEW LEADERBOARD',CW/2,360);
-  ctx.fillText('PRESS [Q] TO RETURN TO TITLE',CW/2,390);
-  ctx.textAlign='left';
+  renderFlow(fl => {
+    fl.line('SYSTEM PAUSED', { size:22, color:G.yellow, gap:24 });
+    const o = { kind:'body', size:18, color:G.text, gap:8 };
+    fl.line('PRESS [P] TO RESUME OPERATION', o);
+    fl.line('PRESS [L] TO VIEW LEADERBOARD', o);
+    fl.line('PRESS [O] FOR OPTIONS', o);
+    fl.line('PRESS [Q] TO RETURN TO TITLE', o);
+  }, { x:CW / 2, top:180, bottom:CH - 120, align:'center', max:CW - 40, center:true });
 }
 
 function drawOver() {
   ctx.fillStyle='rgba(20,21,24,0.94)'; ctx.fillRect(0,0,CW,CH);
-  ctx.textAlign='center';
-  ctx.fillStyle=G.red; ctx.font='20px '+F_PIXEL;
-  ctx.fillText('CLUSTER OVERLOADED!',CW/2,180);
-  ctx.fillStyle=G.dim; ctx.font='18px '+F_RETRO;
-  ctx.fillText('Datacenter capacity exhausted.',CW/2,215);
-  
-  ctx.fillStyle='#FFFFFF'; ctx.font='13px '+F_PIXEL;
-  ctx.fillText('FINAL SCORE: '+score,CW/2,270);
-  ctx.fillStyle=G.text; ctx.font='18px '+F_RETRO;
-  ctx.fillText('LINES CLEARED: '+lines+'   |   LEVEL REACHED: '+level,CW/2,305);
-  ctx.fillStyle=G.green; ctx.font='18px '+F_RETRO;
-  ctx.fillText('MAX REGION: '+REGIONS[Math.min(level-1,9)],CW/2,335);
-  ctx.fillStyle='#E37400'; ctx.font='18px '+F_RETRO;
-  ctx.fillText('PEAK POWER LOAD: '+power+'W',CW/2,365);
-
-  if (score>=highScore && score>0) {
-    ctx.fillStyle=G.yellow; ctx.font='12px '+F_PIXEL;
-    const pulse = 0.7 + 0.3*Math.sin(frame*0.1);
-    ctx.globalAlpha=pulse; ctx.fillText('★ NEW HIGH SCORE RECORD ★',CW/2,420); ctx.globalAlpha=1;
-  }
-  
-  if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.green; ctx.font='12px '+F_PIXEL;
-    ctx.fillText('PRESS ENTER TO SUBMIT SCORE',CW/2,480);
-  }
-  
-  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
-  ctx.fillText('[L] VIEW LEADERBOARD   |   [ESC] TITLE SCREEN',CW/2,530);
-  ctx.textAlign='left';
+  renderFlow(fl => {
+    fl.line('CLUSTER OVERLOADED!', { size:20, color:G.red, gap:6 });
+    fl.line('Datacenter capacity exhausted.', { kind:'body', size:18, color:G.dim, gap:30 });
+    fl.line('FINAL SCORE: ' + score, { size:14, color:'#FFFFFF', gap:10 });
+    fl.line('LINES CLEARED: ' + lines + '   |   LEVEL REACHED: ' + level, { kind:'body', size:18, color:G.text, gap:4 });
+    fl.line('MAX REGION: ' + REGIONS[Math.min(level - 1, 9)], { kind:'body', size:18, color:G.green, gap:4 });
+    fl.line('PEAK POWER LOAD: ' + peakPower + 'W', { kind:'body', size:18, color:'#E37400', gap:30 });
+    const record = score >= highScore && score > 0;
+    if (!fl.dry && record) ctx.globalAlpha = 0.7 + 0.3 * Math.sin(frame * 0.1);
+    fl.line(record ? '★ NEW HIGH SCORE RECORD ★' : '', { size:14, color:G.yellow, gap:30 });
+    ctx.globalAlpha = 1;
+    fl.line(blink() ? 'PRESS ENTER TO SUBMIT SCORE' : '', { size:14, color:G.green, gap:30 });
+    fl.line('[L] VIEW LEADERBOARD   |   [ESC] TITLE SCREEN', { kind:'body', size:18, color:G.dim });
+  }, { x:CW / 2, top:100, bottom:CH - 100, align:'center', max:CW - 40, center:true });
 }
 
 // ─── Name Entry Screen ───
 function drawNameEntry() {
   ctx.fillStyle='rgba(18,20,24,0.96)'; ctx.fillRect(0,0,CW,CH);
-  ctx.textAlign='center';
-  
-  ctx.fillStyle=G.yellow; ctx.font='18px '+F_PIXEL;
-  ctx.fillText('HIGH SCORE ENTRY',CW/2,160);
-  
-  ctx.fillStyle=G.text; ctx.font='12px '+F_PIXEL;
-  ctx.fillText('SCORE: '+score,CW/2,205);
-  ctx.fillStyle=G.green; ctx.font='18px '+F_RETRO;
-  ctx.fillText('REGION: '+REGIONS[Math.min(level-1,9)],CW/2,235);
-  
-  ctx.fillStyle=G.dim; ctx.font='11px '+F_PIXEL;
-  ctx.fillText('ENTER YOUR INITIALS',CW/2,290);
-  
-  // 3 Character Slots
-  const startX = CW/2 - 90;
-  for (let i = 0; i < 3; i++) {
-    const slotX = startX + i * 65;
-    const slotY = 340;
-    const isSelected = (i === nameCursor);
-    
-    ctx.fillStyle = isSelected ? '#303134' : '#222328';
-    ctx.fillRect(slotX, slotY, 50, 60);
-    ctx.strokeStyle = isSelected ? G.yellow : '#5F6368';
-    ctx.lineWidth = isSelected ? 3 : 1;
-    ctx.strokeRect(slotX, slotY, 50, 60);
-    
-    if (isSelected) {
-      ctx.fillStyle = G.yellow; ctx.font = '16px '+F_PIXEL;
-      ctx.fillText('▲', slotX + 25, slotY - 12);
-      ctx.fillText('▼', slotX + 25, slotY + 82);
-    }
-    
-    ctx.fillStyle = isSelected ? G.yellow : '#FFFFFF';
-    ctx.font = '28px '+F_PIXEL;
-    ctx.fillText(nameChars[i], slotX + 25, slotY + 42);
-  }
-  
-  // Instructions
-  ctx.fillStyle=G.dim; ctx.font='18px '+F_RETRO;
-  ctx.fillText('← → : SELECT SLOT      ↑ ↓ : CHANGE LETTER',CW/2,480);
-  
-  if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.green; ctx.font='12px '+F_PIXEL;
-    ctx.fillText('PRESS ENTER TO CONFIRM',CW/2,535);
-  }
-  
-  ctx.textAlign='left';
+  renderFlow(fl => {
+    fl.line('HIGH SCORE ENTRY', { size:18, color:G.yellow, gap:20 });
+    fl.line('SCORE: ' + score, { size:14, color:G.text, gap:4 });
+    fl.line('REGION: ' + REGIONS[Math.min(level - 1, 9)], { kind:'body', size:18, color:G.green, gap:30 });
+    fl.line('ENTER YOUR INITIALS', { size:12, color:G.dim, gap:16 });
+
+    const slotW = Math.max(50, fontPx('pixel', 28) + 16), slotH = Math.max(60, fontPx('pixel', 28) + 28);
+    const arrowH = lineH('pixel', 16), pitch = slotW + 15;
+    fl.box(slotH + arrowH * 2 + 8, (cx, y) => {
+      const startX = cx - (3 * slotW + 2 * 15) / 2;
+      for (let i = 0; i < 3; i++) {
+        const slotX = startX + i * pitch, slotY = y + arrowH + 4, sel = i === nameCursor;
+        ctx.fillStyle = sel ? '#303134' : '#222328'; ctx.fillRect(slotX, slotY, slotW, slotH);
+        ctx.strokeStyle = sel ? G.yellow : '#5F6368'; ctx.lineWidth = sel ? 3 : 1; ctx.strokeRect(slotX, slotY, slotW, slotH);
+        if (sel) {
+          text('▲', slotX + slotW / 2, y, { size:16, color:G.yellow, align:'center' });
+          text('▼', slotX + slotW / 2, slotY + slotH + 4, { size:16, color:G.yellow, align:'center' });
+        }
+        text(nameChars[i], slotX + slotW / 2, slotY + slotH / 2 + 2, { size:28, color: sel ? G.yellow : '#FFFFFF', align:'center', baseline:'middle' });
+      }
+    });
+    fl.gap(30);
+    fl.line('← → : SELECT SLOT      ↑ ↓ : CHANGE LETTER', { kind:'body', size:18, color:G.dim, gap:24 });
+    fl.line(blink() ? 'PRESS ENTER TO CONFIRM' : '', { size:14, color:G.green });
+  }, { x:CW / 2, top:60, bottom:CH - 60, align:'center', max:CW - 40, center:true });
 }
 
 // ─── Leaderboard Screen ───
 function drawLeaderboard() {
   ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
-  ctx.textAlign='center';
-  
-  // Header
-  ctx.fillStyle=G.yellow; ctx.font='16px '+F_PIXEL;
-  ctx.fillText('★ GLOBAL TOP 10 RANKINGS ★',CW/2,55);
-  
-  ctx.fillStyle=G.dim; ctx.font='16px '+F_RETRO;
-  ctx.fillText(leaderboardStatus || 'ONLINE TELEMETRY',CW/2,82);
-  
-  // Table Background Card
-  const tx = 40, ty = 105, tw = CW - 80, th = 520;
+  const cx = CW / 2;
+  let y = 28;
+  text('★ GLOBAL TOP 10 RANKINGS ★', cx, y, { size:16, color:G.yellow, align:'center', max:CW - 40 });
+  y += lineH('pixel', 16);
+  text(leaderboardStatus || 'ONLINE TELEMETRY', cx, y, { kind:'body', size:18, color:G.dim, align:'center', max:CW - 40 });
+  y += lineH('body', 18) + 10;
+
+  const tx = 40, ty = y, tw = CW - 80;
+  const headH = lineH('label', 12) + 18;
+  const rowH = Math.max(lineH('pixel', 12), lineH('body', 18)) + 18;
+  const th = headH + 10 * rowH + 16;
   ctx.fillStyle='#18191C'; ctx.fillRect(tx,ty,tw,th);
   ctx.strokeStyle='#3C4043'; ctx.lineWidth=2; ctx.strokeRect(tx,ty,tw,th);
-  
-  // Table Headers
-  ctx.fillStyle=G.dim; ctx.font='9px '+F_PIXEL;
-  ctx.textAlign='left';
-  ctx.fillText('RANK', tx+20, ty+35);
-  ctx.fillText('NAME', tx+95, ty+35);
-  ctx.fillText('SCORE', tx+200, ty+35);
-  ctx.fillText('DATACENTER', tx+335, ty+35);
-  
-  // Divider
-  ctx.fillStyle='#3C4043'; ctx.fillRect(tx+15, ty+45, tw-30, 2);
-  
-  // Entries
+
+  const col = [0.04, 0.19, 0.40, 0.66].map(f => tx + Math.round(tw * f));
+  const colW = [col[1] - col[0], col[2] - col[1], col[3] - col[2], tx + tw - col[3]].map(w => w - 10);
+  const lbl = { kind:'label', size:12, color:G.dim };
+  ['RANK', 'NAME', 'SCORE', 'DATACENTER'].forEach((h, i) => text(h, col[i], ty + 9, Object.assign({ max:colW[i] }, lbl)));
+  ctx.fillStyle='#3C4043'; ctx.fillRect(tx+15, ty+headH-4, tw-30, 2);
+
   if (leaderboardLoading) {
-    ctx.fillStyle=G.yellow; ctx.font='13px '+F_PIXEL; ctx.textAlign='center';
-    ctx.fillText('CONNECTING TO CLOUD...', CW/2, ty+240);
+    text('CONNECTING TO CLOUD...', cx, ty + th / 2, { size:13, color:G.yellow, align:'center', baseline:'middle', max:tw - 20 });
   } else if (!leaderboardData || leaderboardData.length === 0) {
-    ctx.fillStyle=G.dim; ctx.font='13px '+F_PIXEL; ctx.textAlign='center';
-    ctx.fillText('NO SCORES RECORDED YET', CW/2, ty+240);
+    text('NO SCORES RECORDED YET', cx, ty + th / 2, { size:13, color:G.dim, align:'center', baseline:'middle', max:tw - 20 });
   } else {
     leaderboardData.slice(0, 10).forEach((entry, idx) => {
-      const rowY = ty + 78 + idx * 42;
-      const rank = idx + 1;
-      
-      let rankColor = G.text;
-      let badge = `${rank}`;
+      const ry = ty + headH + 8 + idx * rowH + rowH / 2, rank = idx + 1;
+      let rankColor = G.text, badge = String(rank);
       if (rank === 1) { rankColor = '#FBBC04'; badge = '1ST'; }
       else if (rank === 2) { rankColor = '#7BAAF7'; badge = '2ND'; }
       else if (rank === 3) { rankColor = '#34A853'; badge = '3RD'; }
-      
-      ctx.textAlign='left';
-      ctx.fillStyle = rankColor; ctx.font='10px '+F_PIXEL;
-      ctx.fillText(badge, tx+20, rowY);
-      
-      ctx.fillStyle = '#FFFFFF'; ctx.font='12px '+F_PIXEL;
-      ctx.fillText(entry.name || '???', tx+95, rowY);
-      
-      ctx.fillStyle = G.yellow; ctx.font='12px '+F_PIXEL;
-      ctx.fillText(String(entry.score || 0).padStart(7,'0'), tx+200, rowY);
-      
-      ctx.fillStyle = G.dim; ctx.font='18px '+F_RETRO;
-      ctx.fillText(entry.region || 'us-central1', tx+335, rowY+2);
+      const mid = { baseline:'middle' };
+      text(badge, col[0], ry, Object.assign({ size:12, color:rankColor, max:colW[0] }, mid));
+      text(entry.name || '???', col[1], ry, Object.assign({ size:12, color:'#FFFFFF', max:colW[1] }, mid));
+      text(String(entry.score || 0).padStart(7, '0'), col[2], ry, Object.assign({ size:12, color:G.yellow, max:colW[2] }, mid));
+      text(entry.region || 'us-central1', col[3], ry, Object.assign({ kind:'body', size:18, color:G.dim, max:colW[3] }, mid));
     });
   }
-  
-  // Footer Return Prompt
-  ctx.textAlign='center';
-  if (Math.floor(frame/30)%2===0) {
-    ctx.fillStyle=G.yellow; ctx.font='10px '+F_PIXEL;
-    ctx.fillText('PRESS [ESC] OR [ENTER] TO RETURN', CW/2, 675);
-  }
-  ctx.textAlign='left';
+
+  if (blink()) text('PRESS [ESC] OR [ENTER] TO RETURN', cx, CH - 40, { size:12, color:G.yellow, align:'center', max:CW - 40 });
+}
+
+// ─── Options Screen ───
+let optCursor = 0;
+function drawOptions() {
+  ctx.fillStyle=G.bg; ctx.fillRect(0,0,CW,CH);
+  const left = 40, right = CW - 40;
+  renderFlow(fl => {
+    fl.line('SYSTEM OPTIONS', { size:18, color:G.yellow, gap:8 });
+    fl.line('CHANGES APPLY INSTANTLY AND ARE SAVED', { kind:'body', size:18, color:G.dim, gap:24 });
+    const rowH = lineH('pixel', 14) + 22;
+    OPTION_ROWS.forEach((row, i) => {
+      const sel = i === optCursor;
+      fl.box(rowH, (x, y, h) => {
+        if (sel) {
+          ctx.fillStyle = '#303134'; ctx.fillRect(left, y, right - left, h);
+          ctx.strokeStyle = G.yellow; ctx.lineWidth = 2; ctx.strokeRect(left, y, right - left, h);
+        }
+        const ty = y + h / 2 + 1;
+        text(row.name, left + 14, ty, { size:14, color: sel ? '#FFFFFF' : G.text, baseline:'middle', max:(right - left) * 0.5 });
+        const val = row.opts[settings[row.key]].label, vx = right - 14;
+        if (sel) {
+          text('>', vx, ty, { size:14, color:G.yellow, align:'right', baseline:'middle' });
+          const aw = ctx.measureText('> ').width;
+          text(val, vx - aw, ty, { size:14, color:G.yellow, align:'right', baseline:'middle', max:(right - left) * 0.4 });
+          const vw = ctx.measureText(val).width;
+          text('<', vx - aw - vw - aw, ty, { size:14, color:G.yellow, align:'right', baseline:'middle' });
+        } else {
+          text(val, vx, ty, { size:14, color:G.dim, align:'right', baseline:'middle', max:(right - left) * 0.4 });
+        }
+      });
+      fl.gap(8);
+    });
+    fl.gap(10);
+    fl.line(OPTION_ROWS[optCursor].hint, { kind:'body', size:18, color:G.text, gap:30 });
+    fl.line('↑↓ SELECT    ←→ CHANGE    [ESC] BACK', { kind:'body', size:18, color:G.dim });
+  }, { x:CW / 2, top:40, bottom:CH - 40, align:'center', max:CW - 40, center:true });
 }
 
 // ─── Update ───
@@ -1076,22 +1162,41 @@ function draw() {
       drawNameEntry(); break;
     case ST.LEADERBOARD:
       drawLeaderboard(); break;
+    case ST.OPTIONS:
+      drawOptions(); break;
   }
 }
 
 // ─── Input ───
+function openOptions(returnTo) { prevState = returnTo; state = ST.OPTIONS; }
+function openLeaderboard(returnTo) { prevState = returnTo; state = ST.LEADERBOARD; loadLeaderboard(); }
+
 document.addEventListener('keydown', e => {
-  if (state===ST.MENU) {
-    if(e.key==='Enter'){ startGame(); e.preventDefault(); }
-    else if(e.key==='l'||e.key==='L'){
-      prevState = ST.MENU;
-      state = ST.LEADERBOARD;
-      loadLeaderboard();
-      e.preventDefault();
-    }
+  // Text-size shortcut works on every screen.
+  if (e.key === '[' || e.key === ']') {
+    cycleSetting('text', e.key === ']' ? 1 : -1);
+    SFX.charSelect();
+    e.preventDefault();
     return;
   }
-  
+
+  if (state===ST.MENU) {
+    if(e.key==='Enter'){ startGame(); e.preventDefault(); }
+    else if(e.key==='l'||e.key==='L'){ openLeaderboard(ST.MENU); e.preventDefault(); }
+    else if(e.key==='o'||e.key==='O'){ openOptions(ST.MENU); e.preventDefault(); }
+    return;
+  }
+
+  if (state===ST.OPTIONS) {
+    if (e.key==='ArrowUp')        { optCursor = (optCursor + OPTION_ROWS.length - 1) % OPTION_ROWS.length; SFX.charSelect(); }
+    else if (e.key==='ArrowDown') { optCursor = (optCursor + 1) % OPTION_ROWS.length; SFX.charSelect(); }
+    else if (e.key==='ArrowLeft') { cycleSetting(OPTION_ROWS[optCursor].key, -1); SFX.rotate(); }
+    else if (e.key==='ArrowRight' || e.key==='Enter' || e.key===' ') { cycleSetting(OPTION_ROWS[optCursor].key, 1); SFX.rotate(); }
+    else if (e.key==='Escape' || e.key==='o' || e.key==='O') { state = prevState || ST.MENU; }
+    e.preventDefault();
+    return;
+  }
+
   if (state===ST.LEADERBOARD) {
     if(e.key==='Escape' || e.key==='Enter' || e.key==='l' || e.key==='L'|| e.key===' '){
       state = prevState || ST.MENU;
@@ -1099,28 +1204,18 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
-  
+
   if (state===ST.OVER) {
     if(e.key==='Enter' || e.key===' '){
-      if (score > 0) {
-        state = ST.NAME_ENTRY;
-        nameCursor = 0;
-      } else {
-        state = ST.MENU;
-      }
+      if (score > 0) { state = ST.NAME_ENTRY; nameCursor = 0; }
+      else { state = ST.MENU; }
       e.preventDefault();
-    } else if(e.key==='l' || e.key==='L'){
-      prevState = ST.OVER;
-      state = ST.LEADERBOARD;
-      loadLeaderboard();
-      e.preventDefault();
-    } else if(e.key==='Escape'){
-      state = ST.MENU;
-      e.preventDefault();
-    }
+    } else if(e.key==='l' || e.key==='L'){ openLeaderboard(ST.OVER); e.preventDefault(); }
+    else if(e.key==='o' || e.key==='O'){ openOptions(ST.OVER); e.preventDefault(); }
+    else if(e.key==='Escape'){ state = ST.MENU; e.preventDefault(); }
     return;
   }
-  
+
   if (state===ST.NAME_ENTRY) {
     if (e.key==='ArrowLeft') {
       nameCursor = (nameCursor + 2) % 3;
@@ -1151,25 +1246,20 @@ document.addEventListener('keydown', e => {
       const finalName = nameChars.join('');
       SFX.submit();
       recordScore(finalName, score, REGIONS[Math.min(level-1,9)]);
-      prevState = ST.MENU;
-      state = ST.LEADERBOARD;
-      loadLeaderboard();
+      openLeaderboard(ST.MENU);
       e.preventDefault();
     }
     return;
   }
-  
+
   if (state===ST.PAUSE) {
     if(e.key==='p'||e.key==='P') state=ST.PLAY;
     else if(e.key==='q'||e.key==='Q') state=ST.MENU;
-    else if(e.key==='l'||e.key==='L') {
-      prevState = ST.PAUSE;
-      state = ST.LEADERBOARD;
-      loadLeaderboard();
-    }
+    else if(e.key==='l'||e.key==='L') openLeaderboard(ST.PAUSE);
+    else if(e.key==='o'||e.key==='O') openOptions(ST.PAUSE);
     return;
   }
-  
+
   if (state===ST.PLAY && clearTimer<=0) {
     switch(e.key) {
       case 'ArrowLeft': movePiece(-1,0); break;
@@ -1179,11 +1269,8 @@ document.addEventListener('keydown', e => {
       case ' ': hardDrop(); break;
       case 'c': case 'C': doHold(); break;
       case 'p': case 'P': state=ST.PAUSE; break;
-      case 'l': case 'L':
-        prevState = ST.PLAY;
-        state = ST.LEADERBOARD;
-        loadLeaderboard();
-        break;
+      case 'l': case 'L': openLeaderboard(ST.PLAY); break;
+      case 'o': case 'O': openOptions(ST.PAUSE); break; // resume into pause, not straight into play
     }
   }
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
@@ -1200,7 +1287,7 @@ loadLeaderboard();
 const STEP_MS = 1000 / 60;
 const MAX_FRAME_MS = 250; // cap catch-up after a stall (e.g. tab hidden)
 frame = 0;
-let lastTime = performance.now(), accumulator = 0;
+let lastTime = 0, accumulator = 0;
 function loop(now) {
   accumulator += Math.min(now - lastTime, MAX_FRAME_MS);
   lastTime = now;
@@ -1209,7 +1296,19 @@ function loop(now) {
   draw();
   requestAnimationFrame(loop);
 }
-requestAnimationFrame(loop);
+function startLoop() { lastTime = performance.now(); requestAnimationFrame(loop); }
+
+// Wait (briefly) for the web fonts so the first frames are not drawn in a
+// fallback font; start anyway after 2.5 s if they have not arrived.
+const FONT_LOADS = ['12px "Press Start 2P"', '700 12px "Silkscreen"', '18px "VT323"'];
+if (document.fonts && document.fonts.load) {
+  Promise.race([
+    Promise.all(FONT_LOADS.map(f => document.fonts.load(f).catch(() => {}))),
+    new Promise(r => setTimeout(r, 2500)),
+  ]).then(startLoop);
+} else {
+  startLoop();
+}
 </script>
 </body>
 </html>

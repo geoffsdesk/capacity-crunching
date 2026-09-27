@@ -58,7 +58,24 @@ Progressively deploy across global datacenters with escalating bin-packing chall
 | `C` | Hold Piece |
 | `P` | Pause / Resume Game |
 | `L` | View Top 10 Leaderboard |
+| `O` | Open the Options screen (from the title, pause, or game-over screen) |
+| `[` / `]` | Text size down / up (works on any screen) |
 | `Enter` | Start Game / Confirm Score |
+
+---
+
+## 🔧 Options & Accessibility
+
+Press `O` to open **SYSTEM OPTIONS**. Changes apply instantly and are saved in the browser.
+
+| Option | Choices | Notes |
+|---|---|---|
+| **Display Size** | Fit Window / 1× / 1.5× / 2× | How large the whole game is drawn. Fixed sizes shrink to fit the window. |
+| **Text Size** | Normal / Large / X-Large | Scales all text. The sidebar widens to make room; if a section no longer fits, the controls list moves under the board and the tips are hidden. |
+| **Font Style** | Arcade / Readable | *Arcade* uses the pixel fonts. *Readable* swaps them for clearer ones (Silkscreen headings, a plain monospace for body text). |
+| **Sound** | On / Off | Arcade sound effects. |
+
+The game always renders at your display's native resolution, so text stays sharp on HiDPI screens and under browser zoom (`Ctrl` `+` / `Ctrl` `-` also works as a size control).
 
 ---
 
