@@ -38,6 +38,8 @@ Each workload represents real-world cloud compute infrastructure with unique pow
 Progressively deploy across global datacenters with escalating bin-packing challenges:
 `us-central1` ➔ `us-east1` ➔ `europe-west1` ➔ `asia-east1` ➔ `us-west1` ➔ `europe-west4` ➔ `asia-northeast1` ➔ `us-east5` ➔ `australia-se1` ➔ **`GLOBAL DEPLOY`**
 
+Every 10 lines cleared is a level-up, which migrates you to the next region. Each region has a rack condition (clean, legacy workloads, bad bin-packing, or disaster zone) that decides how much inherited junk lands on your racks when you arrive: up to a few light rows in a clean region, up to 3 dense rows in a disaster zone.
+
 ---
 
 ### 🏆 Global & Local Leaderboard

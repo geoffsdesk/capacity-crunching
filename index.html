@@ -171,24 +171,24 @@ const PIECES = [
 const GARBAGE_COLOR = '#5F6368';
 const GARBAGE_ID = 9;
 
+// One region per level, in order. Level 1 starts in us-central1; every level-up
+// migrates to the next region and inherits that region's legacy workload
+// (its `cond` sets how much junk is on the racks). Levels past the end stay
+// in GLOBAL.
 const DATACENTERS = [
   { name:'us-central1',     cond:'clean' },
   { name:'us-east1',        cond:'moderate' },
-  { name:'us-east5',        cond:'terrible' },
   { name:'europe-west1',    cond:'clean' },
-  { name:'europe-west4',    cond:'moderate' },
-  { name:'europe-north1',   cond:'clean' },
   { name:'asia-east1',      cond:'bad' },
-  { name:'asia-northeast1', cond:'terrible' },
-  { name:'asia-south1',     cond:'bad' },
   { name:'us-west1',        cond:'moderate' },
-  { name:'us-west4',        cond:'bad' },
+  { name:'europe-west4',    cond:'moderate' },
+  { name:'asia-northeast1', cond:'terrible' },
+  { name:'us-east5',        cond:'terrible' },
   { name:'australia-se1',   cond:'bad' },
-  { name:'southam-east1',   cond:'terrible' },
-  { name:'me-central1',     cond:'terrible' },
-  { name:'me-west1',        cond:'bad' },
-  { name:'africa-south1',   cond:'moderate' },
+  { name:'GLOBAL',          cond:'terrible' },
 ];
+function regionFor(lvl) { return DATACENTERS[Math.min(lvl - 1, DATACENTERS.length - 1)]; }
+function regionName() { return regionFor(level).name; }
 const DC_LABELS = { clean:'CLEAN RACKS', moderate:'LEGACY WORKLOADS', bad:'BAD BIN-PACKING', terrible:'DISASTER ZONE' };
 const DC_COLORS = { clean:G.green, moderate:G.blue, bad:G.yellow, terrible:G.red };
 const LINE_PTS = [0, 100, 300, 500, 800];
@@ -196,8 +196,6 @@ const CLEAR_MSG = [null, ['OPTIMIZED!',G.green], ['AUTOSCALED!',G.blue],
                    ['REGION EXPANDED!',G.yellow], ['>>> GLOBAL DEPLOY <<<',G.red]];
 const POWER_REDUCTION = [0, 15, 30, 50, 80];
 const MAX_POWER = 100;
-const REGIONS = ['us-central1','us-east1','europe-west1','asia-east1','us-west1',
-                 'europe-west4','asia-northeast1','us-east5','australia-se1','GLOBAL'];
 
 // ─── Audio ───
 let audioCtx;
@@ -246,7 +244,7 @@ const DEFAULT_SCORES = [
   { name:'VMM', score:6200,  region:'us-east1' },
   { name:'POD', score:4300,  region:'europe-west4' },
   { name:'NET', score:2800,  region:'australia-se1' },
-  { name:'OPS', score:1500,  region:'southam-east1' },
+  { name:'OPS', score:1500,  region:'asia-northeast1' },
   { name:'DEV', score:800,   region:'us-east5' },
 ];
 
@@ -336,7 +334,6 @@ let dropTimer, lockTimer, clearRows, clearTimer, forceCtrl;
 let particles, msg, msgTimer, msgColor, frame;
 let power, peakPower, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
 let gigawattPending, ctrlPlaneRows;
-let currentDC = 0;
 
 // Name Entry State
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?_";
@@ -356,10 +353,10 @@ function resetState() {
   clearRows=[]; clearTimer=0; bag=[]; power=0;
   peakPower=0; shakeTimer=0; shakeX=0; shakeY=0; flashTimer=0; flashColor='#FFF';
   gigawattPending=false; ctrlPlaneRows=0;
-  const dc = pickRegion();
+  const dc = regionFor(level);
   generateInheritedWorkload(dc.cond, true);
   fillBag(); nextType=pullBag(); spawnNext();
-  showMsg(dc.name, DC_COLORS[dc.cond], 120);
+  showMsg(dc.name + ': ' + DC_LABELS[dc.cond], DC_COLORS[dc.cond], 120);
 }
 
 // ─── Piece bag ───
@@ -439,13 +436,6 @@ function triggerGigawatt() {
     spawnParticles(bestRow);
     score += 200 * level;
   }
-}
-
-function pickRegion() {
-  let idx;
-  do { idx = Math.floor(Math.random() * DATACENTERS.length); } while (idx === currentDC);
-  currentDC = idx;
-  return DATACENTERS[idx];
 }
 
 function generateInheritedWorkload(cond, isStart) {
@@ -548,14 +538,19 @@ function finishClear() {
     pts += 200 * ctrlPlaneRows * level;
     showMsg('OVERHEAD ELIMINATED! +' + (200*ctrlPlaneRows*level), '#E37400', 100);
   } else {
-    const nl = Math.floor((lines+n)/10)+1;
-    if (nl > level) { showMsg('LEVEL '+nl+': '+REGIONS[Math.min(nl-1,9)], G.blue, 120); }
-    else { const cm=CLEAR_MSG[Math.min(n,4)]; if(cm) showMsg(cm[0],cm[1]); }
+    const cm=CLEAR_MSG[Math.min(n,4)]; if(cm) showMsg(cm[0],cm[1]);
   }
   score += pts;
   lines += n;
   const nl = Math.floor(lines/10)+1;
-  if (nl > level) { level=nl; SFX.levelUp(); }
+  if (nl > level) {
+    level = nl; SFX.levelUp();
+    // Migrate to the next region and inherit its legacy workload (capped at
+    // 3 rows mid-game so a level-up is a challenge, not a death sentence).
+    const dc = regionFor(level);
+    generateInheritedWorkload(dc.cond, false);
+    showMsg('LEVEL ' + level + ': ' + dc.name, DC_COLORS[dc.cond], 120);
+  }
   clearRows = []; spawnNext();
 }
 
@@ -847,7 +842,7 @@ function drawSidebar() {
       text(String(level), x, y, { size:16, color:G.blue });
       const w = ctx.measureText(String(level) + '  ').width;
       const dy = Math.max(0, Math.round((fontPx('pixel', 16) - fontPx('body', 18)) / 2));
-      text(REGIONS[Math.min(level - 1, 9)], x + w, y + dy, { kind:'body', size:18, color:G.green, max:barW - w });
+      text(regionName(), x + w, y + dy, { kind:'body', size:18, color:G.green, max:barW - w });
     });
     fl.gap(8);
 
@@ -1001,7 +996,7 @@ function drawOver() {
     fl.line('Datacenter capacity exhausted.', { kind:'body', size:18, color:G.dim, gap:30 });
     fl.line('FINAL SCORE: ' + score, { size:14, color:'#FFFFFF', gap:10 });
     fl.line('LINES CLEARED: ' + lines + '   |   LEVEL REACHED: ' + level, { kind:'body', size:18, color:G.text, gap:4 });
-    fl.line('MAX REGION: ' + REGIONS[Math.min(level - 1, 9)], { kind:'body', size:18, color:G.green, gap:4 });
+    fl.line('MAX REGION: ' + regionName(), { kind:'body', size:18, color:G.green, gap:4 });
     fl.line('PEAK POWER LOAD: ' + peakPower + 'W', { kind:'body', size:18, color:'#E37400', gap:30 });
     const record = score >= highScore && score > 0;
     if (!fl.dry && record) ctx.globalAlpha = 0.7 + 0.3 * Math.sin(frame * 0.1);
@@ -1018,7 +1013,7 @@ function drawNameEntry() {
   renderFlow(fl => {
     fl.line('HIGH SCORE ENTRY', { size:18, color:G.yellow, gap:20 });
     fl.line('SCORE: ' + score, { size:14, color:G.text, gap:4 });
-    fl.line('REGION: ' + REGIONS[Math.min(level - 1, 9)], { kind:'body', size:18, color:G.green, gap:30 });
+    fl.line('REGION: ' + regionName(), { kind:'body', size:18, color:G.green, gap:30 });
     fl.line('ENTER YOUR INITIALS', { size:12, color:G.dim, gap:16 });
 
     const slotW = Math.max(50, fontPx('pixel', 28) + 16), slotH = Math.max(60, fontPx('pixel', 28) + 28);
@@ -1245,7 +1240,7 @@ document.addEventListener('keydown', e => {
     } else if (e.key==='Enter' || e.key===' ') {
       const finalName = nameChars.join('');
       SFX.submit();
-      recordScore(finalName, score, REGIONS[Math.min(level-1,9)]);
+      recordScore(finalName, score, regionName());
       openLeaderboard(ST.MENU);
       e.preventDefault();
     }
