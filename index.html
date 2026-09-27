@@ -26,7 +26,9 @@
     box-shadow: 0 0 35px rgba(66,133,244,0.35), 0 0 90px rgba(66,133,244,0.12),
                 inset 0 0 60px rgba(0,0,0,0.6);
   }
-  canvas { display: block; background: #202124; border-radius: 6px; }
+  /* CSS size is set by fitCanvas() so the game fills the window; the backing
+     store is sized separately by devicePixelRatio for crisp HiDPI rendering. */
+  canvas { display: block; background: #202124; border-radius: 6px; width: 580px; height: 720px; }
   #scanlines {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 6px);
@@ -53,6 +55,28 @@ const LEADERBOARD_CONFIG = {
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const CW = 580, CH = 720;
+
+// ─── Display scaling ───
+// All drawing code works in a fixed 580x720 logical space. fitCanvas() scales
+// that space to fill the window and renders at native device resolution, so
+// text stays sharp on HiDPI displays and under browser zoom.
+const SCREEN_MARGIN = 48; // room for the bezel border + glow
+let fitW = 0, fitH = 0, fitDpr = 0;
+function fitCanvas() {
+  const w = window.innerWidth, h = window.innerHeight, dpr = window.devicePixelRatio || 1;
+  if (w === fitW && h === fitH && dpr === fitDpr) return;
+  fitW = w; fitH = h; fitDpr = dpr;
+  const scale = Math.max(0.3, Math.min((w - SCREEN_MARGIN) / CW, (h - SCREEN_MARGIN) / CH));
+  canvas.style.width  = Math.round(CW * scale) + 'px';
+  canvas.style.height = Math.round(CH * scale) + 'px';
+  canvas.width  = Math.round(CW * scale * dpr);
+  canvas.height = Math.round(CH * scale * dpr);
+  // Resizing resets context state, so the transform is applied after.
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+// Checked every frame (cheap: three property reads) rather than via the resize
+// event, which some embedded/emulated viewports do not dispatch reliably.
+fitCanvas();
 
 const COLS = 10, ROWS = 20, CELL = 28;
 const BOARD_X = 20, BOARD_Y = 80;
@@ -1171,8 +1195,21 @@ document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state=
 loadLeaderboard();
 
 // ─── Loop ───
+// Fixed 60 Hz simulation step with an accumulator, so game speed is the same
+// on 60/120/144 Hz displays. Drawing still happens once per animation frame.
+const STEP_MS = 1000 / 60;
+const MAX_FRAME_MS = 250; // cap catch-up after a stall (e.g. tab hidden)
 frame = 0;
-(function loop() { update(); draw(); requestAnimationFrame(loop); })();
+let lastTime = performance.now(), accumulator = 0;
+function loop(now) {
+  accumulator += Math.min(now - lastTime, MAX_FRAME_MS);
+  lastTime = now;
+  while (accumulator >= STEP_MS) { update(); accumulator -= STEP_MS; }
+  fitCanvas();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
