@@ -2,21 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>CAPACITY CRUNCHING</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Silkscreen:wght@400;700&family=VT323&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     background: #121314;
     display: flex;
+    flex-direction: column;
     justify-content: center;
     align-items: center;
     min-height: 100vh;
+    min-height: 100dvh;
     font-family: 'Press Start 2P', monospace;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
   }
   #screen {
     position: relative;
@@ -28,7 +33,22 @@
   }
   /* CSS size is set by fitCanvas() so the game fills the window; the backing
      store is sized separately by devicePixelRatio for crisp HiDPI rendering. */
-  canvas { display: block; background: #202124; border-radius: 6px; width: 580px; height: 720px; }
+  canvas { display: block; background: #202124; border-radius: 6px; width: 580px; height: 720px; touch-action: none; }
+  /* On-screen controls for touch devices. Shown by applyTouchBar(). */
+  #touchbar {
+    display: none; width: 100%; max-width: 720px; gap: 6px; justify-content: center;
+    padding: 10px 8px; padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+  #touchbar.show { display: flex; }
+  #touchbar button {
+    flex: 1 1 0; min-width: 0; height: 58px; padding: 0;
+    font: 700 clamp(8px, 2.9vw, 14px) 'Silkscreen', monospace; color: #E8EAED;
+    background: #303134; border: 2px solid #5F6368; border-radius: 8px;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent; cursor: pointer;
+  }
+  #touchbar button.wide { flex: 1.5 1 0; }
+  #touchbar button:active, #touchbar button.held { background: #4285F4; border-color: #7BAAF7; color: #FFF; }
   #scanlines {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
     background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 6px);
@@ -40,6 +60,15 @@
 <div id="screen">
   <canvas id="game" width="580" height="720"></canvas>
   <div id="scanlines"></div>
+</div>
+<div id="touchbar" aria-label="Touch controls">
+  <button type="button" data-act="left"   aria-label="Move left">&#9664;</button>
+  <button type="button" data-act="right"  aria-label="Move right">&#9654;</button>
+  <button type="button" data-act="rotate" aria-label="Rotate">ROT</button>
+  <button type="button" data-act="down"   aria-label="Soft drop">&#9660;</button>
+  <button type="button" data-act="drop"   aria-label="Hard drop / confirm" class="wide">DROP</button>
+  <button type="button" data-act="hold"   aria-label="Hold piece">HOLD</button>
+  <button type="button" data-act="menu"   aria-label="Pause / back">MENU</button>
 </div>
 <script>
 // ─── Dreamlo Leaderboard Configuration ───
@@ -54,6 +83,7 @@ const LEADERBOARD_CONFIG = {
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const touchbar = document.getElementById('touchbar');
 // ─── Player settings (persisted in localStorage, edited on the OPTIONS screen) ───
 const SETTINGS_KEY = 'cc_settings_v1';
 const DISPLAY_OPTS = [ { label:'FIT WINDOW', scale:0 }, { label:'1X', scale:1 },
@@ -61,13 +91,15 @@ const DISPLAY_OPTS = [ { label:'FIT WINDOW', scale:0 }, { label:'1X', scale:1 },
 const TEXT_OPTS    = [ { label:'NORMAL', scale:1 }, { label:'LARGE', scale:1.2 }, { label:'X-LARGE', scale:1.4 } ];
 const FONT_OPTS    = [ { label:'ARCADE' }, { label:'READABLE' } ];
 const SOUND_OPTS   = [ { label:'ON' }, { label:'OFF' } ];
+const TOUCH_OPTS   = [ { label:'AUTO' }, { label:'ON' }, { label:'OFF' } ];
 const OPTION_ROWS = [
   { key:'display', name:'DISPLAY SIZE', opts:DISPLAY_OPTS, hint:'SIZE OF THE WHOLE GAME. FIXED SIZES SHRINK TO FIT THE WINDOW.' },
   { key:'text',    name:'TEXT SIZE',    opts:TEXT_OPTS,    hint:'SCALES ALL TEXT. SHORTCUT: [ AND ] KEYS ON ANY SCREEN.' },
   { key:'font',    name:'FONT STYLE',   opts:FONT_OPTS,    hint:'READABLE SWAPS THE PIXEL FONTS FOR CLEARER ONES.' },
   { key:'sound',   name:'SOUND',        opts:SOUND_OPTS,   hint:'ARCADE SOUND EFFECTS.' },
+  { key:'touch',   name:'TOUCH BUTTONS', opts:TOUCH_OPTS,  hint:'ON-SCREEN BUTTONS. AUTO SHOWS THEM ON TOUCH DEVICES.' },
 ];
-const settings = { display:0, text:0, font:0, sound:0 };
+const settings = { display:0, text:0, font:0, sound:0, touch:0 };
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -81,7 +113,7 @@ function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringif
 function cycleSetting(key, dir) {
   const row = OPTION_ROWS.find(r => r.key === key);
   settings[key] = (settings[key] + dir + row.opts.length) % row.opts.length;
-  saveSettings(); applyLayout();
+  saveSettings(); applyLayout(); applyTouchBar();
 }
 function textScale() { return TEXT_OPTS[settings.text].scale; }
 loadSettings();
@@ -112,10 +144,12 @@ let fitKey = '';
 function fitCanvas() {
   const w = window.innerWidth, h = window.innerHeight, dpr = window.devicePixelRatio || 1;
   const want = DISPLAY_OPTS[settings.display].scale;
-  const key = [w, h, dpr, CW, want].join(',');
+  const barH = touchbar.classList.contains('show') ? touchbar.offsetHeight : 0;
+  const key = [w, h, dpr, CW, want, barH].join(',');
   if (key === fitKey) return;
   fitKey = key;
-  const fit = Math.min((w - SCREEN_MARGIN) / CW, (h - SCREEN_MARGIN) / CH);
+  const sideMargin = w < 600 ? 16 : SCREEN_MARGIN; // phones: use nearly the full width
+  const fit = Math.min((w - sideMargin) / CW, (h - SCREEN_MARGIN - barH) / CH);
   const scale = Math.max(0.3, want ? Math.min(want, fit) : fit);
   canvas.style.width  = Math.round(CW * scale) + 'px';
   canvas.style.height = Math.round(CH * scale) + 'px';
@@ -883,7 +917,7 @@ function drawSidebar() {
     fl.box(3, (x, y) => { GCOLORS.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(x + i * (barW / 4), y, barW / 4, 3); }); });
     fl.gap(10);
 
-    fl.optional(1, f => {
+    if (!touchUI()) fl.optional(1, f => { // keyboard hints: pointless next to the touch bar
       const o = { kind:'body', size:18, color:G.dim };
       f.line('←→ MOVE    ↑ ROTATE', o);
       f.line('↓ SOFT     SPC DROP', o);
@@ -910,7 +944,7 @@ function drawSidebar() {
 
   // If large text pushed the controls list out of the sidebar, show a compact
   // version in the strip under the board instead.
-  if (fl.used < 1) {
+  if (fl.used < 1 && !touchUI()) {
     const o = { kind:'body', size:18, color:G.dim, align:'center', max:BOARD_W };
     const y = BOARD_Y + BOARD_H + 8, lh = lineH('body', 18);
     text('←→ MOVE  ↑ ROTATE  ↓ SOFT  SPC DROP', BOARD_X + BOARD_W / 2, y, o);
@@ -993,9 +1027,11 @@ function drawTitle() {
     fl.line('🎯 CLEAR CONTROL PLANES FOR MASSIVE BONUS POINTS', Object.assign({ color:'#E8EAED' }, feat));
     fl.gap(24);
 
-    fl.line(blink() ? 'PRESS ENTER TO DEPLOY' : '', { size:14, color:G.yellow, gap:10 });
+    const tui = touchUI();
+    fl.line(blink() ? (tui ? 'TAP TO DEPLOY' : 'PRESS ENTER TO DEPLOY') : '', { size:14, color:G.yellow, gap:10 });
     fl.line('[L] LEADERBOARD    [O] OPTIONS', { size:12, color:G.blue, gap:26 });
-    fl.line('←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD', { kind:'body', size:18, color:G.dim, gap:24 });
+    fl.line(tui ? 'TAP ROTATE   DRAG MOVE   DRAG DOWN SOFT DROP   FLICK DOWN HARD DROP'
+                : '←→ MOVE   ↑ ROTATE   ↓ SOFT DROP   SPACE DROP   C HOLD', { kind:'body', size:18, color:G.dim, gap:24 });
     fl.line(highScore > 0 ? '★ YOUR BEST: ' + highScore + ' ★' : '', { kind:'body', size:18, color:G.yellow });
   }, { x:cx, top:50, bottom:CH - 40, align:'center', max:CW - 40, center:true });
 }
@@ -1045,6 +1081,7 @@ function drawNameEntry() {
       const startX = cx - (3 * slotW + 2 * 15) / 2;
       for (let i = 0; i < 3; i++) {
         const slotX = startX + i * pitch, slotY = y + arrowH + 4, sel = i === nameCursor;
+        nameSlotRects[i] = { x:slotX, y:slotY, w:slotW, h:slotH }; // for tap handling
         ctx.fillStyle = sel ? '#303134' : '#222328'; ctx.fillRect(slotX, slotY, slotW, slotH);
         ctx.strokeStyle = sel ? G.yellow : '#5F6368'; ctx.lineWidth = sel ? 3 : 1; ctx.strokeRect(slotX, slotY, slotW, slotH);
         if (sel) {
@@ -1117,6 +1154,7 @@ function drawOptions() {
     OPTION_ROWS.forEach((row, i) => {
       const sel = i === optCursor;
       fl.box(rowH, (x, y, h) => {
+        optionRowRects[i] = { x:left, y, w:right - left, h }; // for tap handling
         if (sel) {
           ctx.fillStyle = '#303134'; ctx.fillRect(left, y, right - left, h);
           ctx.strokeStyle = G.yellow; ctx.lineWidth = 2; ctx.strokeRect(left, y, right - left, h);
@@ -1190,7 +1228,10 @@ function draw() {
 function openOptions(returnTo) { prevState = returnTo; state = ST.OPTIONS; }
 function openLeaderboard(returnTo) { prevState = returnTo; state = ST.LEADERBOARD; loadLeaderboard(); }
 
-document.addEventListener('keydown', e => {
+// All input (keyboard, touch bar, gestures) goes through handleKey(e), where e
+// only needs {key, repeat, preventDefault()}.
+document.addEventListener('keydown', handleKey);
+function handleKey(e) {
   // Text-size shortcut works on every screen.
   if (e.key === '[' || e.key === ']') {
     cycleSetting('text', e.key === ']' ? 1 : -1);
@@ -1300,9 +1341,126 @@ document.addEventListener('keydown', e => {
     }
   }
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
-});
+}
 
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden && state===ST.PLAY) state=ST.PAUSE; });
+
+// ─── Touch controls ───
+// Gestures on the canvas (tap = rotate / confirm, horizontal drag = move one
+// column per cell, downward drag = soft drop, fast flick down = hard drop)
+// plus the on-screen button bar. Both are translated into the same key
+// presses the keyboard produces, so they share all the state logic.
+let optionRowRects = [], nameSlotRects = [];
+let touchSeen = false;
+function touchUI() { return touchbar.classList.contains('show'); }
+function applyTouchBar() {
+  const mode = settings.touch; // 0 auto, 1 on, 2 off
+  const coarse = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+  const show = mode === 1 || (mode === 0 && (touchSeen || coarse));
+  touchbar.classList.toggle('show', show);
+  fitKey = ''; // bar height changed: re-fit the canvas next frame
+}
+function unlockAudio() {
+  if (!audioCtx) initAudio();
+  else if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+}
+function press(key) { handleKey({ key, repeat:false, preventDefault() {} }); }
+
+// Button bar. Left/right/down auto-repeat while held.
+const BAR_KEYS = { left:'ArrowLeft', right:'ArrowRight', rotate:'ArrowUp', down:'ArrowDown', hold:'c' };
+const BAR_REPEAT = new Set(['left', 'right', 'down']);
+function barAction(act) {
+  if (act === 'drop') return press(state === ST.PLAY ? ' ' : 'Enter');
+  if (act === 'menu') return press(state === ST.PLAY || state === ST.PAUSE ? 'p' : 'Escape');
+  press(BAR_KEYS[act]);
+}
+touchbar.querySelectorAll('button').forEach(btn => {
+  const act = btn.dataset.act;
+  let delayT = 0, repeatT = 0;
+  const stop = () => { clearTimeout(delayT); clearInterval(repeatT); delayT = repeatT = 0; btn.classList.remove('held'); };
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault(); unlockAudio(); touchSeen = true;
+    btn.classList.add('held');
+    barAction(act);
+    if (BAR_REPEAT.has(act)) delayT = setTimeout(() => { repeatT = setInterval(() => barAction(act), 50); }, 170);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => btn.addEventListener(ev, stop));
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+});
+
+// Canvas gestures (touch pointers only, so mouse clicks keep doing nothing).
+let touch = null;
+function canvasPoint(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x:(e.clientX - r.left) * CW / r.width, y:(e.clientY - r.top) * CH / r.height };
+}
+function inRect(p, r) { return r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
+function handleTap(p) {
+  if (state === ST.PLAY) return press('ArrowUp');
+  if (state === ST.PAUSE) return press('p');
+  if (state === ST.OPTIONS) {
+    const i = optionRowRects.findIndex(r => inRect(p, r));
+    if (i < 0) return;
+    if (i !== optCursor) { optCursor = i; SFX.charSelect(); return; }
+    press(p.x < optionRowRects[i].x + optionRowRects[i].w / 2 ? 'ArrowLeft' : 'ArrowRight');
+    return;
+  }
+  if (state === ST.NAME_ENTRY) {
+    const i = nameSlotRects.findIndex(r => inRect(p, r));
+    if (i < 0) return; // confirm with the DROP button
+    if (i !== nameCursor) { nameCursor = i; SFX.charSelect(); return; }
+    press(p.y < nameSlotRects[i].y + nameSlotRects[i].h / 2 ? 'ArrowUp' : 'ArrowDown');
+    return;
+  }
+  press('Enter'); // title, game over, leaderboard
+}
+canvas.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch') return;
+  e.preventDefault(); unlockAudio();
+  if (!touchSeen) { touchSeen = true; if (settings.touch === 0) applyTouchBar(); }
+  try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
+  const p = canvasPoint(e), now = performance.now();
+  touch = { id:e.pointerId, x0:p.x, y0:p.y, ax:p.x, ay:p.y, t0:now, axis:null, moved:false, samples:[{ y:p.y, t:now }] };
+});
+// Vertical velocity (logical px/ms) over roughly the last 80 ms of the gesture.
+function touchVy(t, y, now) {
+  let s = t.samples[0];
+  for (const c of t.samples) if (now - c.t >= 80) s = c;
+  const dt = now - s.t;
+  return dt > 0 ? (y - s.y) / dt : 0;
+}
+canvas.addEventListener('pointermove', e => {
+  if (!touch || e.pointerId !== touch.id) return;
+  e.preventDefault();
+  const p = canvasPoint(e), now = performance.now();
+  touch.samples.push({ y:p.y, t:now });
+  if (touch.samples.length > 12) touch.samples.shift();
+  if (!touch.axis) {
+    const dx = p.x - touch.x0, dy = p.y - touch.y0;
+    if (Math.abs(dx) < CELL * 0.6 && Math.abs(dy) < CELL * 0.6) return;
+    touch.axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+    touch.moved = true;
+  }
+  if (state !== ST.PLAY) return;
+  if (touch.axis === 'x') {
+    while (p.x - touch.ax >= CELL) { press('ArrowRight'); touch.ax += CELL; }
+    while (touch.ax - p.x >= CELL) { press('ArrowLeft');  touch.ax -= CELL; }
+  } else {
+    while (p.y - touch.ay >= CELL) { press('ArrowDown'); touch.ay += CELL; }
+    if (p.y < touch.ay) touch.ay = p.y; // dragging back up just re-anchors
+  }
+});
+function endTouch(e) {
+  if (!touch || e.pointerId !== touch.id) return;
+  const t = touch; touch = null;
+  const p = canvasPoint(e), now = performance.now(), dur = now - t.t0;
+  if (!t.moved) { if (dur < 400) handleTap(p); return; }
+  // A fast downward flick (logical px per ms) is a hard drop.
+  if (state === ST.PLAY && t.axis === 'y' && touchVy(t, p.y, now) > 0.9 && p.y - t.y0 > CELL * 2) press(' ');
+}
+canvas.addEventListener('pointerup', endTouch);
+canvas.addEventListener('pointercancel', endTouch);
+applyTouchBar();
 
 // Initial Leaderboard pre-load
 loadLeaderboard();

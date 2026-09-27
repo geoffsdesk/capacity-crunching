@@ -66,6 +66,21 @@ Every 10 lines cleared is a level-up, which migrates you to the next region. Eac
 
 ---
 
+## 📱 Touch Controls
+
+On phones and tablets an on-screen button bar appears under the game (◀ ▶ ROT ▼ DROP HOLD MENU; ◀ ▶ ▼ auto-repeat while held). The board itself also takes gestures:
+
+| Gesture | Action |
+|---|---|
+| Tap | Rotate (in menus: confirm / start) |
+| Drag left / right | Move one column per cell dragged |
+| Drag down | Soft drop one row per cell dragged |
+| Fast flick down | Hard drop |
+
+On the Options screen, tap a row to select it and tap its left or right half to change it. On the name-entry screen, tap a slot to select it and tap its top or bottom half to change the letter. The bar can be forced on or off with the **Touch Buttons** option.
+
+---
+
 ## 🔧 Options & Accessibility
 
 Press `O` to open **SYSTEM OPTIONS**. Changes apply instantly and are saved in the browser.
@@ -76,6 +91,7 @@ Press `O` to open **SYSTEM OPTIONS**. Changes apply instantly and are saved in t
 | **Text Size** | Normal / Large / X-Large | Scales all text. The sidebar widens to make room; if a section no longer fits, the controls list moves under the board and the tips are hidden. |
 | **Font Style** | Arcade / Readable | *Arcade* uses the pixel fonts. *Readable* swaps them for clearer ones (Silkscreen headings, a plain monospace for body text). |
 | **Sound** | On / Off | Arcade sound effects. |
+| **Touch Buttons** | Auto / On / Off | The on-screen button bar. *Auto* shows it on touch devices. |
 
 The game always renders at your display's native resolution, so text stays sharp on HiDPI screens and under browser zoom (`Ctrl` `+` / `Ctrl` `-` also works as a size control).
 
