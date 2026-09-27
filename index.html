@@ -341,6 +341,9 @@ let state = ST.MENU;
 let prevState = ST.MENU;
 let board, piece, nextType, holdType, canHold, bag, score, highScore, lines, level;
 let dropTimer, lockTimer, clearRows, clearTimer, forceCtrl;
+const LOCK_DELAY = 30;       // frames a grounded piece waits before locking
+const MAX_LOCK_RESETS = 15;  // moves/rotates that may restart that wait per landing
+let inputLockout = 0;        // frames during which Enter/Space are ignored after game over
 let particles, msg, msgTimer, msgColor, frame;
 let power, peakPower, shakeTimer, shakeX, shakeY, flashTimer, flashColor;
 let gigawattPending, ctrlPlaneRows;
@@ -376,7 +379,8 @@ function pullBag() {
 }
 function mkPiece(t) {
   const d = PIECES[t], s = d.shape.map(r=>[...r]);
-  return { type:t, shape:s, x:Math.floor((COLS-s[0].length)/2), y:0, color:d.color };
+  // resets/lowY track the lock-delay reset budget for this piece (see touchLock).
+  return { type:t, shape:s, x:Math.floor((COLS-s[0].length)/2), y:0, color:d.color, resets:0, lowY:0 };
 }
 function spawnNext() {
   piece = mkPiece(nextType);
@@ -477,11 +481,21 @@ function generateInheritedWorkload(cond, isStart) {
 }
 
 // ─── Movement ───
+// A grounded piece gets its lock delay restarted by a move or rotate, but only
+// MAX_LOCK_RESETS times per landing (the budget refills when the piece falls
+// to a new lowest row), so a piece cannot be stalled on the stack forever.
+function touchLock() {
+  if (isValid(piece.shape, piece.x, piece.y+1)) return; // airborne: nothing to reset
+  if (piece.resets >= MAX_LOCK_RESETS) { if (lockTimer <= 0) lockTimer = 1; return; }
+  piece.resets++;
+  lockTimer = LOCK_DELAY;
+}
 function movePiece(dx, dy) {
   if (!piece) return false;
   if (isValid(piece.shape, piece.x+dx, piece.y+dy)) {
     piece.x += dx; piece.y += dy;
-    if (dx !== 0) { SFX.move(); if (!isValid(piece.shape,piece.x,piece.y+1)) lockTimer=30; }
+    if (dy > 0 && piece.y > piece.lowY) { piece.lowY = piece.y; piece.resets = 0; }
+    if (dx !== 0) { SFX.move(); touchLock(); }
     return true;
   }
   return false;
@@ -492,7 +506,7 @@ function rotatePiece() {
   for (const [dx,dy] of [[0,0],[-1,0],[1,0],[0,-1],[-2,0],[2,0],[0,-2]]) {
     if (isValid(r, piece.x+dx, piece.y+dy)) {
       piece.shape=r; piece.x+=dx; piece.y+=dy; SFX.rotate();
-      if (!isValid(piece.shape,piece.x,piece.y+1)) lockTimer=30;
+      touchLock();
       return;
     }
   }
@@ -571,6 +585,7 @@ function doHold() {
 
 function gameOver() {
   state = ST.OVER; SFX.over();
+  inputLockout = 45; // ~0.75 s: the keypress that ended the game must not also skip this screen
   if (score > highScore) { highScore=score; localStorage.setItem('ccHS', String(highScore)); }
 }
 function startGame() { state=ST.PLAY; if(!audioCtx)initAudio(); resetState(); }
@@ -1010,7 +1025,7 @@ function drawOver() {
     if (!fl.dry && record) ctx.globalAlpha = 0.7 + 0.3 * Math.sin(frame * 0.1);
     fl.line(record ? '★ NEW HIGH SCORE RECORD ★' : '', { size:14, color:G.yellow, gap:30 });
     ctx.globalAlpha = 1;
-    fl.line(blink() ? 'PRESS ENTER TO SUBMIT SCORE' : '', { size:14, color:G.green, gap:30 });
+    fl.line(blink() && inputLockout <= 0 ? 'PRESS ENTER TO SUBMIT SCORE' : '', { size:14, color:G.green, gap:30 });
     fl.line('[L] VIEW LEADERBOARD   |   [ESC] TITLE SCREEN', { kind:'body', size:18, color:G.dim });
   }, { x:CW / 2, top:100, bottom:CH - 100, align:'center', max:CW - 40, center:true });
 }
@@ -1041,7 +1056,7 @@ function drawNameEntry() {
     });
     fl.gap(30);
     fl.line('← → : SELECT SLOT      ↑ ↓ : CHANGE LETTER', { kind:'body', size:18, color:G.dim, gap:24 });
-    fl.line(blink() ? 'PRESS ENTER TO CONFIRM' : '', { size:14, color:G.green });
+    fl.line(blink() && inputLockout <= 0 ? 'PRESS ENTER TO CONFIRM' : '', { size:14, color:G.green });
   }, { x:CW / 2, top:60, bottom:CH - 60, align:'center', max:CW - 40, center:true });
 }
 
@@ -1130,6 +1145,7 @@ function drawOptions() {
 // ─── Update ───
 function update() {
   frame++;
+  if (inputLockout>0) inputLockout--;
   if (state!==ST.PLAY) return;
   updateParticles();
   if (msgTimer>0) msgTimer--;
@@ -1141,7 +1157,7 @@ function update() {
   if (!piece) return;
   dropTimer++;
   const spd = Math.max(3, 48-(level-1)*4);
-  if (dropTimer>=spd) { dropTimer=0; if(!movePiece(0,1)) { if(lockTimer<=0) lockTimer=30; } }
+  if (dropTimer>=spd) { dropTimer=0; if(!movePiece(0,1)) { if(lockTimer<=0) lockTimer=LOCK_DELAY; } }
   if (!isValid(piece.shape,piece.x,piece.y+1)) { if(lockTimer>0){lockTimer--;if(lockTimer<=0)lockPiece();} }
   else lockTimer=0;
 }
@@ -1210,9 +1226,10 @@ document.addEventListener('keydown', e => {
 
   if (state===ST.OVER) {
     if(e.key==='Enter' || e.key===' '){
-      if (score > 0) { state = ST.NAME_ENTRY; nameCursor = 0; }
-      else { state = ST.MENU; }
       e.preventDefault();
+      if (inputLockout > 0 || e.repeat) return; // ignore the stroke that ended the game / a held key
+      if (score > 0) { state = ST.NAME_ENTRY; nameCursor = 0; inputLockout = 20; }
+      else { state = ST.MENU; }
     } else if(e.key==='l' || e.key==='L'){ openLeaderboard(ST.OVER); e.preventDefault(); }
     else if(e.key==='o' || e.key==='O'){ openOptions(ST.OVER); e.preventDefault(); }
     else if(e.key==='Escape'){ state = ST.MENU; e.preventDefault(); }
@@ -1246,6 +1263,8 @@ document.addEventListener('keydown', e => {
       SFX.charSelect();
       e.preventDefault();
     } else if (e.key==='Enter' || e.key===' ') {
+      e.preventDefault();
+      if (inputLockout > 0 || e.repeat) return; // a held Enter must not submit "AAA"
       const finalName = nameChars.join('');
       SFX.submit();
       // Show the board immediately, but only fetch it once the cloud submit
